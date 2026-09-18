@@ -36,7 +36,10 @@ function accessDenied(msg) {
   return bot.sendMessage(msg.chat.id, "Access denied.");
 }
 
+// ----------------------------------------------------
 // START
+// ----------------------------------------------------
+
 bot.onText(/\/start/, async (msg) => {
   if (!isOwner(msg)) return accessDenied(msg);
 
@@ -58,7 +61,10 @@ Commands:
   );
 });
 
+// ----------------------------------------------------
 // STATUS
+// ----------------------------------------------------
+
 bot.onText(/\/status/, async (msg) => {
   if (!isOwner(msg)) return;
 
@@ -75,7 +81,10 @@ Sending: ${
   );
 });
 
+// ----------------------------------------------------
 // HELP
+// ----------------------------------------------------
+
 bot.onText(/\/help/, async (msg) => {
   if (!isOwner(msg)) return;
 
@@ -96,7 +105,10 @@ Use /blog to add the article you want to promote.`
   );
 });
 
+// ----------------------------------------------------
 // BLOG
+// ----------------------------------------------------
+
 bot.onText(/\/blog/, async (msg) => {
   if (!isOwner(msg)) return;
 
@@ -113,7 +125,10 @@ https://example.com/my-blog-post`
   );
 });
 
+// ----------------------------------------------------
 // CAMPAIGN
+// ----------------------------------------------------
+
 bot.onText(/\/campaign/, async (msg) => {
   if (!isOwner(msg)) return;
 
@@ -144,7 +159,10 @@ Next we will add prospect discovery and personalized outreach.`
   );
 });
 
+// ----------------------------------------------------
 // TEST
+// ----------------------------------------------------
+
 bot.onText(/\/test/, async (msg) => {
   if (!isOwner(msg)) return;
 
@@ -170,7 +188,10 @@ No emails will actually be sent while dry-run is active.`
   );
 });
 
+// ----------------------------------------------------
 // NORMAL TEXT MESSAGES
+// ----------------------------------------------------
+
 bot.on("message", async (msg) => {
   if (!msg.text) return;
   if (!isOwner(msg)) return;
@@ -180,6 +201,7 @@ bot.on("message", async (msg) => {
   // Ignore commands.
   if (text.startsWith("/")) return;
 
+  // Blog URL
   if (waitingFor === "blogUrl") {
     campaign.blogUrl = text;
     waitingFor = "blogTitle";
@@ -192,6 +214,7 @@ Now send me the title of the blog post.`
     );
   }
 
+  // Blog title
   if (waitingFor === "blogTitle") {
     campaign.blogTitle = text;
     waitingFor = "blogDescription";
@@ -206,6 +229,7 @@ This will later help the bot create relevant outreach messages.`
     );
   }
 
+  // Blog description
   if (waitingFor === "blogDescription") {
     campaign.blogDescription = text;
     waitingFor = null;
@@ -229,8 +253,11 @@ Use /campaign to view it or /test to run a dry-run test.`
 });
 
 // ----------------------------------------------------
-// RENDER WEB SERVICE HEALTH SERVER
+// RENDER WEB SERVICE PORT
 // ----------------------------------------------------
+
+// Render Web Services require the application
+// to listen on a network port.
 
 const PORT = process.env.PORT || 10000;
 
