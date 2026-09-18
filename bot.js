@@ -1,5 +1,6 @@
 require("dotenv").config();
 
+const http = require("http");
 const TelegramBot = require("node-telegram-bot-api");
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -222,4 +223,25 @@ ${campaign.blogUrl}
 Description:
 ${campaign.blogDescription}
 
-Use /campaign to view
+Use /campaign to view it or /test to run a dry-run test.`
+    );
+  }
+});
+
+// ----------------------------------------------------
+// RENDER WEB SERVICE HEALTH SERVER
+// ----------------------------------------------------
+
+const PORT = process.env.PORT || 10000;
+
+http
+  .createServer((req, res) => {
+    res.writeHead(200, {
+      "Content-Type": "text/plain"
+    });
+
+    res.end("Jabari Promoter is running.");
+  })
+  .listen(PORT, "0.0.0.0", () => {
+    console.log(`Jabari Promoter is running on port ${PORT}`);
+  });
