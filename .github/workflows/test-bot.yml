@@ -1,0 +1,25 @@
+name: Jabari Promoter Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Check bot files
+        run: |
+          echo "Jabari Promoter files loaded successfully."
+          node --check bot.js
