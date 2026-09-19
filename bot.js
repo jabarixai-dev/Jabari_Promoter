@@ -5,6 +5,11 @@ const crypto = require("crypto");
 const TelegramBot = require("node-telegram-bot-api");
 const { createClient } = require("@supabase/supabase-js");
 
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+
 const token = process.env.TELEGRAM_BOT_TOKEN;
 
 if (!token) {
@@ -76,6 +81,22 @@ const results = {
 };
 
 let waitingFor = null;
+
+async function testSupabase() {
+  const { data, error } = await supabase
+    .from("promoter_campaign")
+    .select("id")
+    .eq("id", 1)
+    .single();
+
+  if (error) {
+    console.error("Supabase connection failed:", error.message);
+  } else {
+    console.log("Supabase connected successfully:", data);
+  }
+}
+
+testSupabase();
 
 // ----------------------------------------------------
 // OWNER CHECK
