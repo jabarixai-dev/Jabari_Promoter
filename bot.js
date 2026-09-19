@@ -329,7 +329,17 @@ async function finishPromotion(chatId) {
       await supabase.from("promoter_results").insert({ email: c.email, status: "sent", campaign_title: active.title });
     } catch (e) {
       stats.totalFailed++;
-      out.push({ email: c.email, status: "failed", error: e.message });
+
+      console.error("EMAIL SEND FAILED:", {
+        email: c.email,
+        message: e?.message || "Unknown error",
+        code: e?.code || e?.response?.status || null,
+        status: e?.response?.status || null,
+        response: e?.response?.data || null,
+        errors: e?.errors || null
+      });
+
+      out.push({ email: c.email, status: "failed", error: e?.message || "Unknown error" });
       await supabase.from("promoter_results").insert({ email: c.email, status: "failed", campaign_title: active.title });
     }
   }
@@ -368,8 +378,24 @@ async function sendEmail(to, subject, text) {
   const auth = createOAuthClient();
   auth.setCredentials({ refresh_token: googleRefreshToken });
   const gmail = google.gmail({ version: "v1", auth });
-  const response = await gmail.users.messages.send({ userId: "me", requestBody: { raw: createGmailMessage(to, subject, text) } });
-  return { success: true, id: response.data.id };
+  try {
+    const response = await gmail.users.messages.send({
+      userId: "me",
+      requestBody: { raw: createGmailMessage(to, subject, text) }
+    });
+    if (!response?.data?.id) throw new Error("Gmail API did not return a message ID.");
+    return { success: true, id: response.data.id };
+  } catch (e) {
+    console.error("GMAIL API SEND ERROR:", {
+      message: e?.message || "Unknown Gmail error",
+      code: e?.code || null,
+      status: e?.response?.status || null,
+      statusText: e?.response?.statusText || null,
+      response: e?.response?.data || null,
+      errors: e?.errors || null
+    });
+    throw e;
+  }
 }
 
 // ----- Commands: kept as backups. Normal navigation uses buttons. -----
@@ -562,6 +588,13 @@ bot.on("message", async msg => {
     inputState = null;
     await bot.sendMessage(msg.chat.id, `✅ Test email sent to:\n\n${email}`, { reply_markup: { inline_keyboard: [[btn("🏠 Main Menu", "menu_main")]] } });
   } catch (e) {
+    console.error("TEST EMAIL FAILED:", {
+      message: e?.message || "Unknown error",
+      code: e?.code || null,
+      status: e?.response?.status || null,
+      response: e?.response?.data || null,
+      errors: e?.errors || null
+    });
     await bot.sendMessage(msg.chat.id, `❌ Test email failed.\n\n${e.message}`);
   }
 });
