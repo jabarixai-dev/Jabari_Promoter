@@ -63,7 +63,47 @@ const campaign = {
 // Contacts added here should be people who have
 // permission/consent to receive your promotional emails.
 
-const contacts = [];
+async function loadContacts() {
+  const { data, error } = await supabase
+    .from("promoter_contacts")
+    .select("id, name, email")
+    .order("id", { ascending: true });
+
+  if (error) {
+    console.error("Failed to load contacts:", error.message);
+    return [];
+  }
+
+  return data || [];
+}
+
+async function saveContact(name, email) {
+  const { data, error } = await supabase
+    .from("promoter_contacts")
+    .insert({
+      name: name || "",
+      email: email.toLowerCase().trim()
+    })
+    .select("id, name, email")
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+async function deleteContact(email) {
+  const { error } = await supabase
+    .from("promoter_contacts")
+    .delete()
+    .eq("email", email.toLowerCase().trim());
+
+  if (error) {
+    throw error;
+  }
+}
 
 // Maximum number of emails in one /promote run.
 const PROMOTION_LIMIT = 10;
