@@ -1,6 +1,7 @@
 require("dotenv").config();
 
 const http = require("http");
+const crypto = require("crypto");
 const TelegramBot = require("node-telegram-bot-api");
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -19,22 +20,28 @@ const ownerId = String(process.env.BOT_OWNER_ID || "");
 const mode = process.env.MODE || "dry-run";
 
 // ----------------------------------------------------
-// RESEND SETTINGS
+// GOOGLE GMAIL SETTINGS
 // ----------------------------------------------------
 
-const resendApiKey = process.env.RESEND_API_KEY || "";
+const googleClientId =
+  process.env.GOOGLE_CLIENT_ID || "";
 
-// Example:
-// Jabari Promoter <promoter@yourdomain.com>
-//
-// This address/domain must be accepted by Resend.
-const resendFrom = process.env.RESEND_FROM || "";
+const googleClientSecret =
+  process.env.GOOGLE_CLIENT_SECRET || "";
 
-// Safety switch.
-// false = no emails are actually sent.
-// true  = Resend will actually send emails.
-const sendEmails =
-  String(process.env.SEND_EMAILS || "false").toLowerCase() === "true";
+const googleRefreshToken =
+  process.env.GOOGLE_REFRESH_TOKEN || "";
+
+const googleRedirectUri =
+  process.env.GOOGLE_REDIRECT_URI ||
+  "https://jabari-promoter.onrender.com/oauth2callback";
+
+const gmailScope =
+  "https://www.googleapis.com/auth/gmail.send";
+
+// Temporary OAuth state.
+// It is only valid while this server is running.
+let oauthState = null;
 
 // ----------------------------------------------------
 // CAMPAIGN DATA
@@ -46,7 +53,6 @@ const campaign = {
   blogDescription: process.env.BLOG_DESCRIPTION || ""
 };
 
-// Keeps track of what the owner is currently entering.
 let waitingFor = null;
 
 // ----------------------------------------------------
@@ -79,8 +85,12 @@ bot.onText(/\/start/, async (msg) => {
 
 Mode: ${mode}
 
-Email sending:
-${sendEmails ? "🟢 Enabled" : "🔴 Disabled"}
+Gmail:
+${
+  googleRefreshToken
+    ? "🟢 Connected"
+    : "🔴 Not authorized"
+}
 
 Commands:
 
@@ -88,7 +98,8 @@ Commands:
 /blog — Add or view blog
 /campaign — View campaign
 /test — Test campaign
-/testemail — Test Resend email
+/gmailauth — Connect Gmail
+/testemail — Send Gmail test
 /help — Show commands`
   );
 });
@@ -104,28 +115,34 @@ bot.onText(/\/status/, async (msg) => {
     msg.chat.id,
     `✅ Bot is online.
 
-Mode: ${mode}
+Mode:
+${mode}
 
-Email sending:
+Gmail:
+
+Client ID:
 ${
-  sendEmails
-    ? "🟢 Enabled"
-    : "🔴 Disabled (safe mode)"
+  googleClientId
+    ? "✅ Detected"
+    : "❌ Missing"
 }
 
-Resend:
+Client Secret:
 ${
-  resendApiKey
-    ? "✅ API key detected"
-    : "❌ API key missing"
+  googleClientSecret
+    ? "✅ Detected"
+    : "❌ Missing"
+}
+
+Gmail authorization:
+${
+  googleRefreshToken
+    ? "🟢 Connected"
+    : "🔴 Not connected"
 }
 
 Sender:
-${
-  resendFrom
-    ? resendFrom
-    : "❌ RESEND_FROM not configured"
-}`
+jabari.xai@gmail.com`
   );
 });
 
@@ -147,14 +164,15 @@ Available commands:
 /blog
 /campaign
 /test
+/gmailauth
 /testemail
 /help
 
 Use /blog to add the article you want to promote.
 
-Use /testemail to test the Resend connection.
+Use /gmailauth to connect your Gmail account.
 
-Emails remain disabled unless SEND_EMAILS=true.`
+Use /testemail to send a test email.`
   );
 });
 
@@ -208,10 +226,12 @@ ${campaign.blogDescription || "Not set"}
 Mode:
 ${mode}
 
-Email sending:
-${sendEmails ? "Enabled" : "Disabled"}
-
-Next we will add prospect discovery and controlled outreach.`
+Gmail:
+${
+  googleRefreshToken
+    ? "Connected"
+    : "Not connected"
+}`
   );
 });
 
@@ -241,53 +261,213 @@ ${campaign.blogUrl}
 Mode:
 ${mode}
 
-Email sending:
+Gmail:
 ${
-  sendEmails
-    ? "🟢 Enabled"
-    : "🔴 Disabled"
+  googleRefreshToken
+    ? "🟢 Connected"
+    : "🔴 Not connected"
 }
 
-Use /testemail to test the Resend email connection.`
+Use /testemail to send a Gmail test.`
   );
 });
 
 // ----------------------------------------------------
-// RESEND EMAIL FUNCTION
+// GMAIL OAUTH AUTHORIZATION
 // ----------------------------------------------------
 
-async function sendResendEmail({
-  to,
-  subject,
-  html
-}) {
-  if (!resendApiKey) {
-    throw new Error(
-      "RESEND_API_KEY is missing."
+bot.onText(/\/gmailauth/, async (msg) => {
+  if (!isOwner(msg)) return;
+
+  if (!googleClientId || !googleClientSecret) {
+    return bot.sendMessage(
+      msg.chat.id,
+      `❌ Google OAuth is not configured.
+
+Check these Render variables:
+
+GOOGLE_CLIENT_ID
+GOOGLE_CLIENT_SECRET`
     );
   }
 
-  if (!resendFrom) {
-    throw new Error(
-      "RESEND_FROM is missing."
-    );
-  }
+  oauthState = crypto.randomBytes(24).toString("hex");
 
+  const authUrl =
+    "https://accounts.google.com/o/oauth2/v2/auth" +
+    "?client_id=" +
+    encodeURIComponent(googleClientId) +
+    "&redirect_uri=" +
+    encodeURIComponent(googleRedirectUri) +
+    "&response_type=code" +
+    "&scope=" +
+    encodeURIComponent(gmailScope) +
+    "&access_type=offline" +
+    "&prompt=consent" +
+    "&state=" +
+    encodeURIComponent(oauthState);
+
+  await bot.sendMessage(
+    msg.chat.id,
+    `🔐 Gmail authorization
+
+Open this link:
+
+${authUrl}
+
+Then:
+
+1. Sign in with:
+jabari.xai@gmail.com
+
+2. Review the Gmail permission.
+
+3. Allow the app.
+
+4. Google will return you to Jabari Promoter.
+
+⚠️ Only authorize your own Gmail account.
+
+After authorization, come back to Telegram.`
+  );
+});
+
+// ----------------------------------------------------
+// EXCHANGE GOOGLE AUTH CODE FOR TOKENS
+// ----------------------------------------------------
+
+async function exchangeGoogleCode(code) {
   const response = await fetch(
-    "https://api.resend.com/emails",
+    "https://oauth2.googleapis.com/token",
     {
       method: "POST",
 
       headers: {
-        "Authorization": `Bearer ${resendApiKey}`,
-        "Content-Type": "application/json"
+        "Content-Type":
+          "application/x-www-form-urlencoded"
+      },
+
+      body: new URLSearchParams({
+        code,
+        client_id: googleClientId,
+        client_secret: googleClientSecret,
+        redirect_uri: googleRedirectUri,
+        grant_type: "authorization_code"
+      }).toString()
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(
+      data?.error_description ||
+      data?.error ||
+      "Google token exchange failed."
+    );
+  }
+
+  return data;
+}
+
+// ----------------------------------------------------
+// GET ACCESS TOKEN USING REFRESH TOKEN
+// ----------------------------------------------------
+
+async function getGoogleAccessToken() {
+  if (!googleRefreshToken) {
+    throw new Error(
+      "GOOGLE_REFRESH_TOKEN is missing."
+    );
+  }
+
+  const response = await fetch(
+    "https://oauth2.googleapis.com/token",
+    {
+      method: "POST",
+
+      headers: {
+        "Content-Type":
+          "application/x-www-form-urlencoded"
+      },
+
+      body: new URLSearchParams({
+        client_id: googleClientId,
+        client_secret: googleClientSecret,
+        refresh_token: googleRefreshToken,
+        grant_type: "refresh_token"
+      }).toString()
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(
+      data?.error_description ||
+      data?.error ||
+      "Could not refresh Google access token."
+    );
+  }
+
+  return data.access_token;
+}
+
+// ----------------------------------------------------
+// BASE64URL ENCODER
+// ----------------------------------------------------
+
+function base64UrlEncode(value) {
+  return Buffer
+    .from(value, "utf8")
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+// ----------------------------------------------------
+// GMAIL SEND FUNCTION
+// ----------------------------------------------------
+
+async function sendGmail({
+  to,
+  subject,
+  html
+}) {
+  const accessToken =
+    await getGoogleAccessToken();
+
+  const from =
+    "Jabari Promoter <jabari.xai@gmail.com>";
+
+  const message = [
+    `From: ${from}`,
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    "MIME-Version: 1.0",
+    "Content-Type: text/html; charset=UTF-8",
+    "",
+    html
+  ].join("\r\n");
+
+  const raw =
+    base64UrlEncode(message);
+
+  const response = await fetch(
+    "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+    {
+      method: "POST",
+
+      headers: {
+        "Authorization":
+          `Bearer ${accessToken}`,
+        "Content-Type":
+          "application/json"
       },
 
       body: JSON.stringify({
-        from: resendFrom,
-        to: [to],
-        subject,
-        html
+        raw
       })
     }
   );
@@ -295,40 +475,47 @@ async function sendResendEmail({
   const data = await response.json();
 
   if (!response.ok) {
-    const errorMessage =
-      data?.message ||
-      data?.error ||
-      "Resend returned an unknown error.";
-
-    throw new Error(errorMessage);
+    throw new Error(
+      data?.error?.message ||
+      "Gmail API returned an error."
+    );
   }
 
   return data;
 }
 
 // ----------------------------------------------------
-// TEST RESEND EMAIL
+// TEST GMAIL EMAIL
 // ----------------------------------------------------
 
 bot.onText(/\/testemail/, async (msg) => {
   if (!isOwner(msg)) return;
 
+  if (!googleRefreshToken) {
+    return bot.sendMessage(
+      msg.chat.id,
+      `❌ Gmail is not connected yet.
+
+Use:
+
+/gmailauth
+
+first.`
+    );
+  }
+
   waitingFor = "testEmail";
 
   await bot.sendMessage(
     msg.chat.id,
-    `📧 Resend email test
+    `📧 Gmail test
 
 Send the email address that should receive the test.
 
-Example:
-you@example.com
+For the first test, use an email address you control.
 
-${
-  sendEmails
-    ? "🟢 Email sending is ENABLED."
-    : "🔴 Email sending is currently DISABLED. The test will only preview the email."
-}`
+Example:
+you@example.com`
   );
 });
 
@@ -342,11 +529,10 @@ bot.on("message", async (msg) => {
 
   const text = msg.text.trim();
 
-  // Ignore commands.
   if (text.startsWith("/")) return;
 
   // --------------------------------------------------
-  // TEST EMAIL RECIPIENT
+  // TEST EMAIL
   // --------------------------------------------------
 
   if (waitingFor === "testEmail") {
@@ -354,14 +540,15 @@ bot.on("message", async (msg) => {
 
     const recipient = text;
 
-    // Basic email validation.
     const emailPattern =
       /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
     if (!emailPattern.test(recipient)) {
       return bot.sendMessage(
         msg.chat.id,
-        "❌ That doesn't look like a valid email address.\n\nUse /testemail to try again."
+        `❌ That doesn't look like a valid email address.
+
+Use /testemail to try again.`
       );
     }
 
@@ -403,7 +590,8 @@ bot.on("message", async (msg) => {
 
     <p>
       This is a test email sent through
-      <strong>Jabari Promoter</strong>.
+      <strong>Jabari Promoter</strong>
+      using Gmail.
     </p>
 
     <p>
@@ -427,37 +615,12 @@ bot.on("message", async (msg) => {
 </html>
 `;
 
-    // ------------------------------------------------
-    // SAFE MODE
-    // ------------------------------------------------
-
-    if (!sendEmails) {
-      return bot.sendMessage(
-        msg.chat.id,
-        `🧪 Resend test prepared.
-
-Recipient:
-${recipient}
-
-Subject:
-${subject}
-
-Status:
-🔴 NOT SENT
-
-SEND_EMAILS is currently false, so no email was delivered.
-
-Set SEND_EMAILS=true in Render when you're ready to perform the real test.`
-      );
-    }
-
-    // ------------------------------------------------
-    // SEND THROUGH RESEND
-    // ------------------------------------------------
-
     await bot.sendMessage(
       msg.chat.id,
-      `📤 Sending test email...
+      `📤 Sending Gmail test...
+
+From:
+jabari.xai@gmail.com
 
 To:
 ${recipient}`
@@ -465,7 +628,7 @@ ${recipient}`
 
     try {
       const result =
-        await sendResendEmail({
+        await sendGmail({
           to: recipient,
           subject,
           html
@@ -473,12 +636,15 @@ ${recipient}`
 
       await bot.sendMessage(
         msg.chat.id,
-        `✅ Test email sent successfully.
+        `✅ Gmail test email sent successfully.
 
-Recipient:
+From:
+jabari.xai@gmail.com
+
+To:
 ${recipient}
 
-Resend ID:
+Gmail message ID:
 ${result.id || "Not returned"}
 
 Check the recipient inbox.`
@@ -486,22 +652,23 @@ Check the recipient inbox.`
 
     } catch (error) {
       console.error(
-        "Resend email error:",
+        "Gmail error:",
         error
       );
 
       await bot.sendMessage(
         msg.chat.id,
-        `❌ Resend failed.
+        `❌ Gmail sending failed.
 
 Reason:
 ${error.message}
 
 Check:
-• RESEND_API_KEY
-• RESEND_FROM
-• Your Resend sender/domain
-• Resend account status`
+• Google OAuth setup
+• GOOGLE_CLIENT_ID
+• GOOGLE_CLIENT_SECRET
+• GOOGLE_REFRESH_TOKEN
+• Gmail API`
       );
     }
 
@@ -565,7 +732,7 @@ ${campaign.blogDescription}
 
 Use /campaign to view it.
 
-Use /testemail to test Resend.`
+Use /testemail to test Gmail.`
     );
   }
 });
@@ -592,6 +759,203 @@ function escapeAttribute(value) {
 }
 
 // ----------------------------------------------------
+// RENDER OAUTH CALLBACK
+// ----------------------------------------------------
+
+const PORT =
+  process.env.PORT || 10000;
+
+const server =
+  http.createServer(
+    async (req, res) => {
+
+      // ----------------------------------------------
+      // GOOGLE OAUTH CALLBACK
+      // ----------------------------------------------
+
+      if (
+        req.url.startsWith(
+          "/oauth2callback"
+        )
+      ) {
+        try {
+          const url =
+            new URL(
+              req.url,
+              `http://localhost:${PORT}`
+            );
+
+          const code =
+            url.searchParams.get("code");
+
+          const state =
+            url.searchParams.get("state");
+
+          const error =
+            url.searchParams.get("error");
+
+          if (error) {
+            res.writeHead(400, {
+              "Content-Type":
+                "text/html; charset=utf-8"
+            });
+
+            return res.end(`
+              <h2>Google authorization cancelled</h2>
+              <p>You can close this page and return to Telegram.</p>
+            `);
+          }
+
+          if (!code) {
+            res.writeHead(400, {
+              "Content-Type":
+                "text/html; charset=utf-8"
+            });
+
+            return res.end(`
+              <h2>Authorization code missing</h2>
+            `);
+          }
+
+          if (
+            !oauthState ||
+            state !== oauthState
+          ) {
+            res.writeHead(400, {
+              "Content-Type":
+                "text/html; charset=utf-8"
+            });
+
+            return res.end(`
+              <h2>Invalid authorization state</h2>
+              <p>Please start again with /gmailauth.</p>
+            `);
+          }
+
+          oauthState = null;
+
+          const tokens =
+            await exchangeGoogleCode(
+              code
+            );
+
+          console.log(
+            "Google OAuth completed."
+          );
+
+          res.writeHead(200, {
+            "Content-Type":
+              "text/html; charset=utf-8"
+          });
+
+          if (tokens.refresh_token) {
+            return res.end(`
+              <!DOCTYPE html>
+              <html>
+              <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width,initial-scale=1">
+                <title>Jabari Promoter</title>
+              </head>
+
+              <body style="font-family:Arial,sans-serif;padding:30px;max-width:700px;margin:auto;">
+
+                <h2>✅ Gmail authorization successful</h2>
+
+                <p>
+                  Google has authorized Jabari Promoter.
+                </p>
+
+                <p>
+                  A refresh token was generated.
+                </p>
+
+                <p>
+                  Add the following value to Render as:
+                </p>
+
+                <p>
+                  <strong>GOOGLE_REFRESH_TOKEN</strong>
+                </p>
+
+                <textarea
+                  style="width:100%;height:140px;"
+                  readonly
+                >${escapeHtml(tokens.refresh_token)}</textarea>
+
+                <p style="color:#b00020;">
+                  ⚠️ Keep this token private. Do not post it publicly or send it to anyone.
+                </p>
+
+                <p>
+                  After adding it to Render, redeploy the service.
+                </p>
+
+                <p>
+                  Then return to Telegram and use /status.
+                </p>
+
+              </body>
+              </html>
+            `);
+          }
+
+          return res.end(`
+            <!DOCTYPE html>
+            <html>
+            <body style="font-family:Arial,sans-serif;padding:30px;">
+              <h2>⚠️ Authorization completed</h2>
+              <p>Google did not return a refresh token.</p>
+              <p>Run /gmailauth again and authorize the account when prompted.</p>
+            </body>
+            </html>
+          `);
+
+        } catch (error) {
+          console.error(
+            "OAuth callback error:",
+            error
+          );
+
+          res.writeHead(500, {
+            "Content-Type":
+              "text/html; charset=utf-8"
+          });
+
+          return res.end(`
+            <h2>❌ Gmail authorization failed</h2>
+            <p>${escapeHtml(error.message)}</p>
+            <p>Return to Telegram and try /gmailauth again.</p>
+          `);
+        }
+      }
+
+      // ----------------------------------------------
+      // NORMAL RENDER HEALTH CHECK
+      // ----------------------------------------------
+
+      res.writeHead(200, {
+        "Content-Type":
+          "text/plain"
+      });
+
+      res.end(
+        "Jabari Promoter is running."
+      );
+    }
+  );
+
+server.listen(
+  PORT,
+  "0.0.0.0",
+  () => {
+    console.log(
+      `Jabari Promoter is running on port ${PORT}`
+    );
+  }
+);
+
+// ----------------------------------------------------
 // TELEGRAM POLLING ERROR
 // ----------------------------------------------------
 
@@ -601,30 +965,3 @@ bot.on("polling_error", (error) => {
     error.message
   );
 });
-
-// ----------------------------------------------------
-// RENDER WEB SERVICE PORT
-// ----------------------------------------------------
-
-const PORT =
-  process.env.PORT || 10000;
-
-http
-  .createServer((req, res) => {
-    res.writeHead(200, {
-      "Content-Type": "text/plain"
-    });
-
-    res.end(
-      "Jabari Promoter is running."
-    );
-  })
-  .listen(
-    PORT,
-    "0.0.0.0",
-    () => {
-      console.log(
-        `Jabari Promoter is running on port ${PORT}`
-      );
-    }
-  );
