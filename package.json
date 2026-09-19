@@ -9,6 +9,7 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.57.4",
     "dotenv": "^16.4.5",
+    "googleapis": "^181.0.0",
     "node-telegram-bot-api": "^0.66.0"
   }
 }
