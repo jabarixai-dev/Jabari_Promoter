@@ -48,57 +48,81 @@ const gmailScope =
 let oauthState = null;
 
 // ----------------------------------------------------
-// CAMPAIGN
+// CAMPAIGN WIZARD
 // ----------------------------------------------------
 
-const campaign = {
-  blogUrl: process.env.BLOG_URL || "",
-  blogTitle: process.env.BLOG_TITLE || "",
-  blogDescription: process.env.BLOG_DESCRIPTION || ""
-};
+let campaignDraft = null;
 
-async function loadCampaign() {
-  const { data, error } = await supabase
-    .from("promoter_campaign")
-    .select("blog_url, blog_title, blog_description")
-    .eq("id", 1)
-    .single();
+bot.onText(/^\/campaign$/, async msg => {
+  if (!isOwner(msg)) {
+    return accessDenied(msg);
+  }
 
-  if (error) {
-    console.error(
-      "Failed to load campaign:",
-      error.message
+  campaignDraft = {
+    chatId: msg.chat.id,
+    step: "title",
+    title: "",
+    description: "",
+    url: ""
+  };
+
+  await bot.sendMessage(
+    msg.chat.id,
+    "Let's create a campaign.\n\nWhat is the campaign title?",
+    {
+      reply_markup: {
+        force_reply: true,
+        input_field_placeholder:
+          "Enter campaign title"
+      }
+    }
+  );
+});
+
+// ----------------------------------------------------
+// CAMPAIGN CANCEL
+// ----------------------------------------------------
+
+bot.onText(/^\/cancelcampaign$/, async msg => {
+  if (!isOwner(msg)) {
+    return accessDenied(msg);
+  }
+
+  campaignDraft = null;
+
+  await bot.sendMessage(
+    msg.chat.id,
+    "Campaign creation cancelled."
+  );
+});
+
+// ----------------------------------------------------
+// DELETE SAVED CAMPAIGN
+// ----------------------------------------------------
+
+bot.onText(/^\/deletecampaign$/, async msg => {
+  if (!isOwner(msg)) {
+    return accessDenied(msg);
+  }
+
+  campaign.blogUrl = "";
+  campaign.blogTitle = "";
+  campaign.blogDescription = "";
+
+  try {
+    await saveCampaign();
+
+    await bot.sendMessage(
+      msg.chat.id,
+      "Saved campaign deleted successfully."
     );
-    return;
+  } catch (error) {
+    await bot.sendMessage(
+      msg.chat.id,
+      `Could not delete campaign.\n\n${error.message}`
+    );
   }
-
-  campaign.blogUrl =
-    data?.blog_url || campaign.blogUrl;
-
-  campaign.blogTitle =
-    data?.blog_title || campaign.blogTitle;
-
-  campaign.blogDescription =
-    data?.blog_description ||
-    campaign.blogDescription;
-}
-
-async function saveCampaign() {
-  const { error } = await supabase
-    .from("promoter_campaign")
-    .upsert({
-      id: 1,
-      blog_url: campaign.blogUrl || "",
-      blog_title: campaign.blogTitle || "",
-      blog_description:
-        campaign.blogDescription || "",
-      updated_at: new Date().toISOString()
-    });
-
-  if (error) {
-    throw error;
-  }
-}
+});
 
 // ----------------------------------------------------
 // CONTACTS
@@ -1124,7 +1148,7 @@ ${error.message}`
 );
 
 // ----------------------------------------------------
-// TEXT INPUT HANDLER
+// CAMPAIGN WIZARD INPUT HANDLER
 // ----------------------------------------------------
 
 bot.on("message", async msg => {
@@ -1132,73 +1156,323 @@ bot.on("message", async msg => {
     return;
   }
 
-  if (
-    !msg.text ||
-    msg.text.startsWith("/")
-  ) {
+  if (!msg.text) {
+    return;
+  }
+
+  // Ignore commands
+  if (msg.text.startsWith("/")) {
+    return;
+  }
+
+  if (!campaignDraft) {
     return;
   }
 
   if (
-    !waitingFor ||
-    waitingFor.chatId !== msg.chat.id
+    campaignDraft.chatId !== msg.chat.id
   ) {
     return;
   }
 
-  if (
-    waitingFor.type === "campaign"
-  ) {
-    const lines =
-      msg.text
-        .split("\n")
-        .map(line => line.trim());
+  // --------------------------------------------------
+  // STEP 1 — TITLE
+  // --------------------------------------------------
 
-    if (lines.length < 3) {
+  if (
+    campaignDraft.step === "title"
+  ) {
+    campaignDraft.title =
+      msg.text.trim();
+
+    if (!campaignDraft.title) {
       return bot.sendMessage(
         msg.chat.id,
-        `Please send:
-
-Title
-Description
-URL`
+        "Please enter a campaign title."
       );
     }
 
+    campaignDraft.step =
+      "description";
+
+    await bot.sendMessage(
+      msg.chat.id,
+      "Now send the campaign description.\n\nYou can use multiple paragraphs and line breaks. When you are finished, send the message.",
+      {
+        reply_markup: {
+          force_reply: true,
+          input_field_placeholder:
+            "Enter campaign description"
+        }
+      }
+    );
+
+    return;
+  }
+
+  // --------------------------------------------------
+  // STEP 2 — DESCRIPTION
+  // --------------------------------------------------
+
+  if (
+    campaignDraft.step ===
+    "description"
+  ) {
+    campaignDraft.description =
+      msg.text;
+
+    if (
+      !campaignDraft.description.trim()
+    ) {
+      return bot.sendMessage(
+        msg.chat.id,
+        "Please enter a campaign description."
+      );
+    }
+
+    campaignDraft.step = "url";
+
+    await bot.sendMessage(
+      msg.chat.id,
+      "Great. Now send the blog URL.",
+      {
+        reply_markup: {
+          force_reply: true,
+          input_field_placeholder:
+            "https://example.com/article"
+        }
+      }
+    );
+
+    return;
+  }
+
+  // --------------------------------------------------
+  // STEP 3 — BLOG URL
+  // --------------------------------------------------
+
+  if (
+    campaignDraft.step === "url"
+  ) {
+    const url =
+      msg.text.trim();
+
+    let validUrl = false;
+
+    try {
+      const parsedUrl =
+        new URL(url);
+
+      validUrl =
+        parsedUrl.protocol ===
+          "http:" ||
+        parsedUrl.protocol ===
+          "https:";
+    } catch {
+      validUrl = false;
+    }
+
+    if (!validUrl) {
+      return bot.sendMessage(
+        msg.chat.id,
+        "That doesn't look like a valid blog URL.\n\nPlease send a URL beginning with https://",
+        {
+          reply_markup: {
+            force_reply: true,
+            input_field_placeholder:
+              "https://example.com/article"
+          }
+        }
+      );
+    }
+
+    campaignDraft.url = url;
+
+    // ------------------------------------------------
+    // SHOW PREVIEW
+    // ------------------------------------------------
+
+    const preview =
+      `Campaign Preview
+
+Title:
+${campaignDraft.title}
+
+Description:
+${campaignDraft.description}
+
+URL:
+${campaignDraft.url}`;
+
+    await bot.sendMessage(
+      msg.chat.id,
+      preview,
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: "✅ Save Campaign",
+                callback_data:
+                  "campaign_save"
+              },
+              {
+                text: "❌ Cancel",
+                callback_data:
+                  "campaign_cancel"
+              }
+            ]
+          ]
+        }
+      }
+    );
+
+    return;
+  }
+});
+
+// ----------------------------------------------------
+// CAMPAIGN BUTTONS
+// ----------------------------------------------------
+
+bot.on(
+  "callback_query",
+  async query => {
+    if (
+      !query.message ||
+      !isOwner({
+        from: query.from
+      })
+    ) {
+      return;
+    }
+
+    if (
+      query.data !==
+        "campaign_save" &&
+      query.data !==
+        "campaign_cancel"
+    ) {
+      return;
+    }
+
+    const chatId =
+      query.message.chat.id;
+
+    if (!campaignDraft) {
+      await bot.answerCallbackQuery(
+        query.id,
+        {
+          text:
+            "This campaign draft has expired."
+        }
+      );
+
+      return;
+    }
+
+    // ----------------------------------------------
+    // CANCEL
+    // ----------------------------------------------
+
+    if (
+      query.data ===
+      "campaign_cancel"
+    ) {
+      campaignDraft = null;
+
+      await bot.answerCallbackQuery(
+        query.id,
+        {
+          text:
+            "Campaign cancelled."
+        }
+      );
+
+      await bot.editMessageReplyMarkup(
+        {
+          inline_keyboard: []
+        },
+        {
+          chat_id: chatId,
+          message_id:
+            query.message.message_id
+        }
+      );
+
+      await bot.sendMessage(
+        chatId,
+        "Campaign creation cancelled."
+      );
+
+      return;
+    }
+
+    // ----------------------------------------------
+    // SAVE
+    // ----------------------------------------------
+
     campaign.blogTitle =
-      lines[0] || "";
+      campaignDraft.title;
 
     campaign.blogDescription =
-      lines[1] || "";
+      campaignDraft.description;
 
     campaign.blogUrl =
-      lines.slice(2).join("\n") || "";
+      campaignDraft.url;
 
     try {
       await saveCampaign();
 
-      waitingFor = null;
+      campaignDraft = null;
 
-      await bot.sendMessage(
-        msg.chat.id,
-        `Campaign saved successfully.
-
-Title:
-${campaign.blogTitle}
-
-URL:
-${campaign.blogUrl}`
+      await bot.answerCallbackQuery(
+        query.id,
+        {
+          text:
+            "Campaign saved!"
+        }
       );
-    } catch (error) {
+
+      await bot.editMessageReplyMarkup(
+        {
+          inline_keyboard: []
+        },
+        {
+          chat_id: chatId,
+          message_id:
+            query.message.message_id
+        }
+      );
+
       await bot.sendMessage(
-        msg.chat.id,
+        chatId,
+        "✅ Campaign saved successfully.\n\nYou can view it with /blog"
+      );
+
+    } catch (error) {
+      console.error(
+        "Campaign save error:",
+        error.message
+      );
+
+      await bot.answerCallbackQuery(
+        query.id,
+        {
+          text:
+            "Could not save campaign."
+        }
+      );
+
+      await bot.sendMessage(
+        chatId,
         `Could not save campaign.
 
 ${error.message}`
       );
     }
   }
-});
+);
 
 // ----------------------------------------------------
 // TELEGRAM ERROR HANDLERS
