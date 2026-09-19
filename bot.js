@@ -3,6 +3,7 @@ require("dotenv").config();
 const http = require("http");
 const crypto = require("crypto");
 const TelegramBot = require("node-telegram-bot-api");
+const { createClient } = require("@supabase/supabase-js");
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 
