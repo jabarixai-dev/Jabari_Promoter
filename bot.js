@@ -764,7 +764,7 @@ async function sendGmail({
   const message = [
     `From: ${from}`,
     `To: ${to}`,
-    `Subject: ${subject}`,
+    `Subject: =?UTF-8?B?${Buffer.from(subject, "utf8").toString("base64")}?=`,
     "MIME-Version: 1.0",
     "Content-Type: text/html; charset=UTF-8",
     "",
