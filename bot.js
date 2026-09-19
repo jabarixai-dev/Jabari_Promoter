@@ -2,6 +2,7 @@ require("dotenv").config();
 
 const http = require("http");
 const crypto = require("crypto");
+const dns = require("dns").promises;
 const TelegramBot = require("node-telegram-bot-api");
 const { createClient } = require("@supabase/supabase-js");
 
@@ -33,6 +34,8 @@ let contacts = [];
 let inputState = null;
 let stats = { totalRuns: 0, totalSent: 0, totalFailed: 0, lastRun: null };
 let oauthState = null;
+let scanResults = [];
+let scanPages = [];
 
 function isOwner(update) {
   return !!ownerId && String(update?.from?.id) === ownerId;
@@ -96,6 +99,157 @@ async function removeContact(id) {
   const { error } = await supabase.from("promoter_contacts").delete().eq("id", id);
   if (error) throw error;
   await loadContacts();
+}
+
+
+function isPrivateIp(ip) {
+  if (ip.includes(":")) {
+    const v = ip.toLowerCase();
+    return v === "::1" || v === "::" || v.startsWith("fc") || v.startsWith("fd") || v.startsWith("fe8") || v.startsWith("fe9") || v.startsWith("fea") || v.startsWith("feb");
+  }
+  const parts = ip.split(".").map(Number);
+  if (parts.length !== 4 || parts.some(Number.isNaN)) return true;
+  const [a, b] = parts;
+  return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+}
+
+async function assertPublicUrl(rawUrl) {
+  let u;
+  try { u = new URL(rawUrl); } catch { throw new Error("Please provide a valid website URL."); }
+  if (!["http:", "https:"].includes(u.protocol)) throw new Error("Only http:// and https:// websites are supported.");
+  if (u.username || u.password) throw new Error("Website URLs with embedded usernames or passwords are not allowed.");
+  const addresses = await dns.lookup(u.hostname, { all: true });
+  if (!addresses.length || addresses.some(x => isPrivateIp(x.address))) {
+    throw new Error("That website resolves to a private or local network address and cannot be scanned.");
+  }
+  return u;
+}
+
+async function fetchPublicPage(rawUrl, maxRedirects = 3) {
+  let current = await assertPublicUrl(rawUrl);
+  for (let i = 0; i <= maxRedirects; i++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12000);
+    let response;
+    try {
+      response = await fetch(current.href, {
+        redirect: "manual",
+        signal: controller.signal,
+        headers: { "User-Agent": "JabariPromoter/1.0 (+public-email-scanner)" }
+      });
+    } catch (e) {
+      if (e?.name === "AbortError") throw new Error("The website took too long to respond.");
+      throw new Error(`Could not open the website: ${e.message}`);
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      const location = response.headers.get("location");
+      if (!location) throw new Error(`Website returned redirect status ${response.status} without a destination.`);
+      current = await assertPublicUrl(new URL(location, current).href);
+      continue;
+    }
+    if (!response.ok) throw new Error(`Website returned HTTP ${response.status}.`);
+    const type = (response.headers.get("content-type") || "").toLowerCase();
+    if (!type.includes("text/html") && !type.includes("application/xhtml+xml")) throw new Error("That URL does not appear to be a public HTML webpage.");
+    const length = Number(response.headers.get("content-length") || 0);
+    if (length > 1500000) throw new Error("The webpage is too large to scan safely.");
+
+    const reader = response.body?.getReader();
+    if (!reader) return { url: current.href, html: await response.text() };
+    const chunks = [];
+    let total = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > 1500000) {
+        await reader.cancel();
+        throw new Error("The webpage is too large to scan safely.");
+      }
+      chunks.push(value);
+    }
+    return { url: current.href, html: Buffer.concat(chunks.map(x => Buffer.from(x))).toString("utf8") };
+  }
+  throw new Error("Too many website redirects.");
+}
+
+function extractEmails(html) {
+  const decoded = html.replace(/&#64;|&#x40;/gi, "@");
+  const found = new Set();
+  const mailtos = decoded.match(/mailto:[^'"\\s>]+/gi) || [];
+  for (const item of mailtos) {
+    const email = item.slice(7).split(/[?#]/)[0].trim().toLowerCase();
+    if (/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) found.add(email);
+  }
+  const plain = decoded.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/gi) || [];
+  for (const email of plain) found.add(email.toLowerCase());
+  return [...found].filter(email => !/\\.(png|jpe?g|gif|webp|svg|css|js)$/i.test(email));
+}
+
+function extractSameOriginLinks(html, baseUrl) {
+  const base = new URL(baseUrl);
+  const links = [];
+  const seen = new Set();
+  const re = /(?:href|action)\\s*=\\s*["']([^"']+)["']/gi;
+  let match;
+  while ((match = re.exec(html)) && links.length < 30) {
+    try {
+      const u = new URL(match[1], base);
+      if (!["http:", "https:"].includes(u.protocol) || u.origin !== base.origin) continue;
+      u.hash = "";
+      if (/\\.(pdf|zip|png|jpe?g|gif|webp|svg|mp4|mp3|css|js)(\\?.*)?$/i.test(u.pathname)) continue;
+      if (u.href === base.href || seen.has(u.href)) continue;
+      seen.add(u.href);
+      links.push(u.href);
+    } catch (_) {}
+  }
+  return links;
+}
+
+async function scanWebsite(rawUrl) {
+  const first = await assertPublicUrl(rawUrl);
+  const queue = [first.href];
+  const visited = new Set();
+  const emails = new Set();
+  const pages = [];
+  const maxPages = 5;
+  while (queue.length && pages.length < maxPages) {
+    const url = queue.shift();
+    if (visited.has(url)) continue;
+    visited.add(url);
+    try {
+      const page = await fetchPublicPage(url);
+      pages.push(page.url);
+      for (const email of extractEmails(page.html)) emails.add(email);
+      if (pages.length < maxPages) {
+        for (const link of extractSameOriginLinks(page.html, page.url)) {
+          if (!visited.has(link) && queue.length < 20) queue.push(link);
+        }
+      }
+    } catch (e) {
+      console.log(`Scanner skipped ${url}: ${e.message}`);
+    }
+  }
+  return { emails: [...emails].sort(), pages };
+}
+
+async function addScannedEmails(emails) {
+  await loadContacts();
+  const existing = new Set(contacts.map(c => c.email.toLowerCase()));
+  let added = 0;
+  for (const email of emails) {
+    if (existing.has(email.toLowerCase())) continue;
+    try {
+      await addContact("", email);
+      existing.add(email.toLowerCase());
+      added++;
+    } catch (e) {
+      console.error(`Could not add scanned email ${email}:`, e.message);
+    }
+  }
+  return added;
 }
 
 async function getCampaigns() {
@@ -176,7 +330,7 @@ function mainMenu() {
   return menu([
     [btn("📝 Campaigns", "menu_campaigns"), btn("👥 Contacts", "menu_contacts")],
     [btn("📧 Promote", "menu_promote"), btn("📊 Status", "menu_status")],
-    [btn("🧪 Test Email", "menu_testemail")]
+    [btn("🕵️ Email Scanner", "menu_scanner"), btn("🧪 Test Email", "menu_testemail")]
   ]);
 }
 
@@ -252,6 +406,32 @@ async function showContactDetails(chatId, messageId, id) {
   const kb = { inline_keyboard: [[btn("🗑️ Delete Contact", `contact_delete:${c.id}`)], [btn("⬅️ Back", "contact_list")]] };
   if (messageId) return safeEdit(chatId, messageId, text, kb);
   return bot.sendMessage(chatId, text, { reply_markup: kb });
+}
+
+
+async function showScannerMenu(chatId, messageId) {
+  const text = `🕵️ Email Scanner\n\nScan publicly accessible webpages for publicly listed email addresses.\n\nPrivate accounts and login-protected pages are not accessed.\n\nCurrent results: ${scanResults.length}`;
+  const rows = [[btn("🌐 Scan Website", "scanner_website")]];
+  if (scanResults.length) rows.push([btn("👀 View Results", "scanner_results"), btn("➕ Add All", "scanner_add_all")]);
+  rows.push([btn("⬅️ Back", "menu_main")]);
+  if (messageId) return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
+  return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: rows } });
+}
+
+function scannerResultsText() {
+  if (!scanResults.length) return "🕵️ Scanner Results\n\nNo public email addresses were found.";
+  const shown = scanResults.slice(0, 40).map((email, i) => `${i + 1}. ${email}`).join("\n");
+  const more = scanResults.length > 40 ? `\n\n…and ${scanResults.length - 40} more.` : "";
+  return `🕵️ Scanner Results\n\nFound: ${scanResults.length}\nPages scanned: ${scanPages.length}\n\n${shown}${more}`;
+}
+
+async function showScannerResults(chatId, messageId) {
+  const rows = [];
+  if (scanResults.length) rows.push([btn("➕ Add All to Contacts", "scanner_add_all")]);
+  rows.push([btn("🕵️ Scan Another Website", "scanner_website")]);
+  rows.push([btn("⬅️ Scanner", "menu_scanner")]);
+  if (messageId) return safeEdit(chatId, messageId, scannerResultsText(), { inline_keyboard: rows });
+  return bot.sendMessage(chatId, scannerResultsText(), { reply_markup: { inline_keyboard: rows } });
 }
 
 async function showStatus(chatId, messageId) {
@@ -430,6 +610,22 @@ bot.on("message", async msg => {
   if (!isOwner(msg) || !msg.text || msg.text.startsWith("/") || !inputState || inputState.chatId !== msg.chat.id) return;
   const s = inputState;
   try {
+    if (s.type === "scan_website") {
+      const url = msg.text.trim();
+      if (!(await validateUrl(url))) return bot.sendMessage(msg.chat.id, "Please send a valid URL beginning with https://");
+      inputState = null;
+      await bot.sendMessage(msg.chat.id, "🕵️ Scanning…\n\nI will check the public page and up to 4 additional pages on the same website.");
+      try {
+        const result = await scanWebsite(url);
+        scanResults = result.emails;
+        scanPages = result.pages;
+        return showScannerResults(msg.chat.id);
+      } catch (e) {
+        console.error("Website scanner error:", e.message);
+        return bot.sendMessage(msg.chat.id, `❌ Scan failed.\n\n${e.message}`, { reply_markup: { inline_keyboard: [[btn("🕵️ Scanner", "menu_scanner")], [btn("🏠 Main Menu", "menu_main")]] } });
+      }
+    }
+
     if (s.type === "campaign_create" || s.type === "campaign_edit") {
       if (s.step === "title") {
         if (!msg.text.trim()) return bot.sendMessage(msg.chat.id, "Please enter a campaign title.");
@@ -480,6 +676,19 @@ bot.on("callback_query", async q => {
     if (data === "menu_contacts") return showContactsMenu(chatId, messageId);
     if (data === "menu_status") return showStatus(chatId, messageId);
     if (data === "menu_promote") return showPromoteMenu(chatId, messageId);
+    if (data === "menu_scanner") return showScannerMenu(chatId, messageId);
+
+    if (data === "scanner_website") {
+      inputState = { chatId, type: "scan_website", step: "url" };
+      return safeEdit(chatId, messageId, "🌐 Scan Website\n\nSend the public website URL you want to scan.\n\nExample:\nhttps://example.com", { inline_keyboard: [[btn("❌ Cancel", "scanner_cancel")]] });
+    }
+    if (data === "scanner_results") return showScannerResults(chatId, messageId);
+    if (data === "scanner_cancel") { inputState = null; return showScannerMenu(chatId, messageId); }
+    if (data === "scanner_add_all") {
+      if (!scanResults.length) return showScannerResults(chatId, messageId);
+      const added = await addScannedEmails(scanResults);
+      return safeEdit(chatId, messageId, `✅ Scanner results added.\n\nNew contacts: ${added}\nAlready in contacts: ${scanResults.length - added}`, { inline_keyboard: [[btn("👥 Contacts", "menu_contacts")], [btn("🕵️ Scanner", "menu_scanner")]] });
+    }
 
     if (data === "campaign_create") {
       beginWizard(chatId, "campaign_create");
