@@ -1,283 +1,199 @@
-const config = window.JABARI_CONFIG || {};
+const c = window.JABARI_CONFIG || {};
+const ready = !!(c.SUPABASE_URL && c.SUPABASE_KEY);
 
-const SUPABASE_URL = config.SUPABASE_URL;
-const SUPABASE_KEY = config.SUPABASE_KEY;
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (x) => ({
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#039;"
+}[x]));
 
-const supabaseReady = Boolean(SUPABASE_URL && SUPABASE_KEY);
-
-const esc = (value) =>
-  String(value ?? "").replace(/[&<>"']/g, (char) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#039;"
-  }[char]));
+function slugify(value) {
+  return String(value || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "-")
+    .replace(/-+/g, "-");
+}
 
 async function api(path) {
-  if (!supabaseReady) {
-    throw new Error("Supabase URL or publishable key is missing.");
-  }
+  if (!ready) throw new Error("Supabase is not configured.");
 
-  const response = await fetch(
-    `${SUPABASE_URL}/rest/v1/${path}`,
-    {
-      headers: {
-        apikey: SUPABASE_KEY
-      }
+  const r = await fetch(c.SUPABASE_URL + "/rest/v1/" + path, {
+    headers: {
+      apikey: c.SUPABASE_KEY,
+      Authorization: "Bearer " + c.SUPABASE_KEY
     }
-  );
+  });
 
-  const responseText = await response.text();
-
-  if (!response.ok) {
-    throw new Error(
-      `HTTP ${response.status}: ${responseText || "No error message returned"}`
-    );
+  if (!r.ok) {
+    const text = await r.text().catch(() => "");
+    throw new Error(`Supabase request failed (${r.status})${text ? `: ${text}` : ""}`);
   }
 
-  try {
-    return JSON.parse(responseText);
-  } catch {
-    throw new Error(
-      `Supabase returned an invalid response: ${responseText}`
-    );
-  }
+  return r.json();
 }
 
-function showError(error) {
-  console.error("Jabari Media error:", error);
-
-  const message = esc(error?.message || String(error));
-
-  document
-    .querySelectorAll(".grid, #latest, #grid, #results, #article")
-    .forEach((element) => {
-      element.innerHTML = `
-        <div class="error-box">
-          <strong>Supabase connection error</strong>
-          <p>${message}</p>
-        </div>
-      `;
-    });
+function card(a) {
+  return `<a class="card" href="article.html?slug=${encodeURIComponent(a.slug)}">
+    ${a.featured_image
+      ? `<img src="${esc(a.featured_image)}" alt="${esc(a.title)}">`
+      : "<div class='ph'>Jabari</div>"}
+    <div>
+      <small>${esc(a.media_categories?.name || "Jabari")}</small>
+      <h3>${esc(a.title)}</h3>
+      <p>${esc(a.excerpt || "")}</p>
+    </div>
+  </a>`;
 }
 
-function card(article) {
-  const category = article.media_categories?.name || "Jabari";
+function setActiveNav(page, categoryName = "") {
+  const links = document.querySelectorAll("header nav a");
+  const currentCategory = String(categoryName || "").trim().toLowerCase();
 
-  return `
-    <a class="card" href="article.html?slug=${encodeURIComponent(article.slug)}">
-      ${
-        article.featured_image
-          ? `<img src="${esc(article.featured_image)}" alt="${esc(article.title)}">`
-          : `<div class="ph">Jabari</div>`
-      }
+  links.forEach((link) => {
+    link.classList.remove("active");
+    link.removeAttribute("aria-current");
 
-      <div>
-        <small>${esc(category)}</small>
-        <h3>${esc(article.title)}</h3>
-        <p>${esc(article.excerpt || "")}</p>
-      </div>
-    </a>
-  `;
+    const href = link.getAttribute("href") || "";
+    let active = false;
+
+    if (page === "home" && href === "index.html") active = true;
+    if (page === "about" && href === "about.html") active = true;
+    if (page === "search" && href === "search.html") active = true;
+
+    if (page === "category") {
+      const match = href.match(/category=([^&]+)/i);
+      if (match && decodeURIComponent(match[1]).toLowerCase() === currentCategory) active = true;
+    }
+
+    if (page === "article" && currentCategory) {
+      const match = href.match(/category=([^&]+)/i);
+      if (match && decodeURIComponent(match[1]).toLowerCase() === currentCategory) active = true;
+    }
+
+    if (active) {
+      link.classList.add("active");
+      link.setAttribute("aria-current", "page");
+    }
+  });
 }
 
-async function loadHome() {
-  const latest = document.querySelector("#latest");
-
-  if (!latest) return;
-
-  latest.innerHTML = "<p>Testing Supabase connection…</p>";
-
-  const articles = await api(
-    "media_articles" +
-    "?select=*,media_categories(name)" +
-    "&status=eq.published" +
-    "&order=published_at.desc" +
-    "&limit=6"
-  );
-
-  latest.innerHTML = articles.length
-    ? articles.map(card).join("")
-    : "<p>Supabase connected successfully. No published stories yet.</p>";
+function showGridMessage(message) {
+  const grid = document.querySelector("#grid");
+  if (grid) grid.innerHTML = `<p class="status-message">${esc(message)}</p>`;
 }
 
 async function loadCategory() {
+  const params = new URLSearchParams(location.search);
+  const cat = params.get("category") || "News";
+  const slug = slugify(cat);
+
   const title = document.querySelector("#title");
-  const description = document.querySelector("#desc");
-  const grid = document.querySelector("#grid");
+  const desc = document.querySelector("#desc");
+  if (title) title.textContent = cat;
+  if (desc) desc.textContent = "Stories from " + cat + ".";
 
-  if (!grid) return;
+  setActiveNav("category", cat);
 
-  const category =
-    new URLSearchParams(location.search).get("category") || "News";
+  const categories = await api(`media_categories?select=id,name,slug&slug=eq.${encodeURIComponent(slug)}&limit=1`);
+  const category = categories[0];
 
-  if (title) title.textContent = category;
-
-  if (description) {
-    description.textContent = `Stories from ${category}.`;
+  if (!category) {
+    showGridMessage(`The ${cat} category has not been created yet.`);
+    return;
   }
 
-  grid.innerHTML = "<p>Testing Supabase connection…</p>";
-
   const articles = await api(
-    "media_articles" +
-    "?select=*,media_categories(name)" +
-    "&status=eq.published" +
-    "&order=published_at.desc" +
-    "&limit=100"
+    `media_articles?select=*,media_categories(name)&status=eq.published&category_id=eq.${encodeURIComponent(category.id)}&order=published_at.desc&limit=100`
   );
 
-  const filtered = articles.filter(
-    (article) =>
-      (article.media_categories?.name || "").toLowerCase() ===
-      category.toLowerCase()
-  );
+  const grid = document.querySelector("#grid");
+  if (grid) {
+    grid.innerHTML = articles.length
+      ? articles.map(card).join("")
+      : "<p class='status-message'>No published stories in this category yet.</p>";
+  }
+}
 
-  grid.innerHTML = filtered.length
-    ? filtered.map(card).join("")
-    : `<p>Supabase connected. No published ${esc(category)} stories yet.</p>`;
+async function loadHome() {
+  setActiveNav("home");
+  const d = await api("media_articles?select=*,media_categories(name)&status=eq.published&order=published_at.desc&limit=6");
+  const latest = document.querySelector("#latest");
+  if (latest) latest.innerHTML = d.length ? d.map(card).join("") : "<p>No published stories yet.</p>";
 }
 
 async function loadArticle() {
-  const articleContainer = document.querySelector("#article");
-
-  if (!articleContainer) return;
-
   const slug = new URLSearchParams(location.search).get("slug");
-
+  const el = document.querySelector("#article");
   if (!slug) {
-    articleContainer.innerHTML = "<p>Article not found.</p>";
+    if (el) el.innerHTML = "<p>Article not found.</p>";
     return;
   }
 
-  articleContainer.innerHTML = "<p>Testing Supabase connection…</p>";
-
-  const articles = await api(
-    "media_articles" +
-    "?select=*,media_categories(name),media_authors(name)" +
-    "&status=eq.published" +
-    `&slug=eq.${encodeURIComponent(slug)}`
+  const d = await api(
+    `media_articles?select=*,media_categories(name),media_authors(name)&status=eq.published&slug=eq.${encodeURIComponent(slug)}&limit=1`
   );
+  const a = d[0];
 
-  const article = articles[0];
-
-  if (!article) {
-    articleContainer.innerHTML =
-      "<p>Supabase connected, but this article does not exist.</p>";
+  if (!a) {
+    if (el) el.innerHTML = "<p>Article not found.</p>";
     return;
   }
 
-  document.title = `${article.title} — Jabari`;
+  setActiveNav("article", a.media_categories?.name || "");
+  document.title = a.title + " — Jabari";
 
-  articleContainer.innerHTML = `
-    <section class="articlehead">
-      <small>${esc(article.media_categories?.name || "Jabari")}</small>
-      <h1>${esc(article.title)}</h1>
-      <p>${esc(article.excerpt || "")}</p>
-      ${
-        article.media_authors?.name
-          ? `<small>By ${esc(article.media_authors.name)}</small>`
-          : ""
-      }
+  if (el) {
+    el.innerHTML = `<section class="articlehead">
+      <small>${esc(a.media_categories?.name || "Jabari")}</small>
+      <h1>${esc(a.title)}</h1>
+      <p>${esc(a.excerpt || "")}</p>
     </section>
-
-    ${
-      article.featured_image
-        ? `
-          <img
-            class="articleimg"
-            src="${esc(article.featured_image)}"
-            alt="${esc(article.title)}"
-          >
-        `
-        : ""
-    }
-
-    <div class="content">
-      ${article.content || ""}
-    </div>
-  `;
+    ${a.featured_image ? `<img class="articleimg" src="${esc(a.featured_image)}" alt="${esc(a.title)}">` : ""}
+    <div class="content">${a.content || ""}</div>`;
+  }
 }
 
-async function setupSearch() {
-  const searchForm = document.querySelector("#search");
+function setupSearch() {
+  setActiveNav("search");
+  const form = document.querySelector("#search");
+  if (!form) return;
 
-  if (!searchForm) return;
-
-  searchForm.onsubmit = async (event) => {
-    event.preventDefault();
-
-    const input = document.querySelector("#q");
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const q = document.querySelector("#q").value.trim().toLowerCase();
     const results = document.querySelector("#results");
-
-    if (!input || !results) return;
-
-    const query = input.value.trim().toLowerCase();
-
-    if (!query) {
-      results.innerHTML = "<p>Enter something to search.</p>";
+    if (!q) {
+      if (results) results.innerHTML = "<p>Enter a search term.</p>";
       return;
     }
 
-    results.innerHTML = "<p>Searching…</p>";
-
-    const articles = await api(
-      "media_articles" +
-      "?select=*,media_categories(name)" +
-      "&status=eq.published" +
-      "&order=published_at.desc" +
-      "&limit=100"
-    );
-
-    const matches = articles.filter((article) => {
-      const searchableText = [
-        article.title,
-        article.excerpt,
-        article.content,
-        article.media_categories?.name
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-
-      return searchableText.includes(query);
-    });
-
-    results.innerHTML = matches.length
-      ? matches.map(card).join("")
-      : "<p>No matching stories.</p>";
+    if (results) results.innerHTML = "<p>Searching…</p>";
+    const d = await api("media_articles?select=*,media_categories(name)&status=eq.published&order=published_at.desc&limit=100");
+    const matches = d.filter((a) => (a.title + " " + (a.excerpt || "")).toLowerCase().includes(q));
+    if (results) results.innerHTML = matches.map(card).join("") || "<p>No matching stories.</p>";
   };
 }
 
 async function run() {
+  const page = document.body?.dataset?.page || (() => {
+    const last = location.pathname.split("/").pop() || "index.html";
+    return last.split("?")[0].replace(".html", "") || "index";
+  })();
+
   try {
-    const page =
-      location.pathname.split("/").pop() || "index.html";
-
-    if (!supabaseReady) {
-      throw new Error(
-        "Supabase configuration is missing. Check assets/config.js."
-      );
-    }
-
-    if (page === "index.html") {
-      await loadHome();
-    }
-
-    if (page === "category.html") {
-      await loadCategory();
-    }
-
-    if (page === "article.html") {
-      await loadArticle();
-    }
-
-    if (page === "search.html") {
-      await setupSearch();
-    }
-  } catch (error) {
-    showError(error);
+    if (page === "index") return await loadHome();
+    if (page === "category") return await loadCategory();
+    if (page === "article") return await loadArticle();
+    if (page === "search") return setupSearch();
+    if (page === "about") return setActiveNav("about");
+  } catch (e) {
+    console.error("Jabari Media page error:", e);
+    const target = document.querySelector("#grid, #latest, #article, #results");
+    if (target) target.innerHTML = `<p class="status-message error-message">Could not load this page right now. Please refresh and try again.</p>`;
   }
 }
 
