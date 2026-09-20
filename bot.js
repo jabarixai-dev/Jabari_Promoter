@@ -405,6 +405,29 @@ async function ensureMediaWorkerSecret() {
   return mediaWorkerSecret;
 }
 
+const MEDIA_TIMEZONE = "Africa/Lagos";
+
+function nextAutopilotRunDate(frequency) {
+  if (!frequency || frequency === "manual") return null;
+  const hours = frequency === "twice_daily" ? 12 : frequency === "weekly" ? 168 : 24;
+  return new Date(Date.now() + hours * 60 * 60 * 1000);
+}
+
+function formatAutopilotDate(value) {
+  if (!value) return "Not scheduled";
+  return new Intl.DateTimeFormat("en-NG", {
+    timeZone: MEDIA_TIMEZONE,
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+    timeZoneName: "short"
+  }).format(new Date(value));
+}
+
 async function getMediaAutopilot() {
   const { data, error } = await supabase.from("media_autopilot").select("*").eq("id", 1).single();
   if (error) throw error;
@@ -609,7 +632,7 @@ async function showMediaMenu(chatId, messageId) {
 
 async function showMediaAutopilot(chatId, messageId) {
   const a = await getMediaAutopilot();
-  const text = `⚙️ Jabari Autopilot\n\nStatus: ${a.enabled ? "🟢 ON" : "🔴 OFF"}\nMode: ${a.mode}\nFrequency: ${a.publishing_frequency}\nNext run: ${a.next_run_at ? new Date(a.next_run_at).toLocaleString() : "Not scheduled"}\nLast run: ${a.last_run_at ? new Date(a.last_run_at).toLocaleString() : "Never"}`;
+  const text = `⚙️ Jabari Autopilot\n\nStatus: ${a.enabled ? "🟢 ON" : "🔴 OFF"}\nMode: ${a.mode}\nFrequency: ${a.publishing_frequency}\nTimezone: WAT (Africa/Lagos)\nNext run: ${formatAutopilotDate(a.next_run_at)}\nLast run: ${a.last_run_at ? formatAutopilotDate(a.last_run_at) : "Never"}`;
   const rows = [[btn(a.enabled ? "🔴 Turn OFF" : "🟢 Turn ON", "media_toggle_auto")],[btn("▶️ Run Now", "media_run_now")],[btn("📝 Mode: " + a.mode, "media_mode")],[btn("⏱ Frequency: " + a.publishing_frequency, "media_frequency")],[btn("⬅️ Media", "menu_media")]];
   if (messageId) return safeEdit(chatId,messageId,text,{inline_keyboard:rows});
   return bot.sendMessage(chatId,text,{reply_markup:{inline_keyboard:rows}});
@@ -1018,7 +1041,7 @@ bot.on("callback_query", async q => {
     if (data === "media_toggle_auto") {
       const a = await getMediaAutopilot();
       const next = !a.enabled;
-      await setMediaAutopilot({ enabled: next, next_run_at: next ? new Date().toISOString() : null });
+      await setMediaAutopilot({ enabled: next, next_run_at: next ? nextAutopilotRunDate(a.publishing_frequency)?.toISOString() : null });
       return showMediaAutopilot(chatId, messageId);
     }
     if (data === "media_mode") {
@@ -1031,7 +1054,7 @@ bot.on("callback_query", async q => {
       const a = await getMediaAutopilot();
       const order = ["manual","daily","twice_daily","weekly"];
       const next = order[(order.indexOf(a.publishing_frequency) + 1) % order.length];
-      await setMediaAutopilot({ publishing_frequency: next, next_run_at: a.enabled && next !== "manual" ? new Date().toISOString() : null });
+      await setMediaAutopilot({ publishing_frequency: next, next_run_at: a.enabled && next !== "manual" ? nextAutopilotRunDate(next)?.toISOString() : null });
       return showMediaAutopilot(chatId, messageId);
     }
     if (data === "media_run_now") {
