@@ -500,6 +500,40 @@ async function requestGeminiArticle(prompt) {
   throw lastError || new Error("Gemini request failed after retries and fallback models.");
 }
 
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function applySourceCitations(content, sources) {
+  let html = String(content || "").trim();
+  const used = new Set();
+
+  html = html.replace(/\[(?:SOURCE\s*)?(\d+)\]/gi, (match, number) => {
+    const index = Number(number);
+    if (!Number.isInteger(index) || index < 1 || index > sources.length) return "";
+    used.add(index);
+    return `<sup class="article-source-citation">[${index}]</sup>`;
+  });
+
+  const references = Array.from(used).sort((a, b) => a - b);
+  if (!references.length) {
+    return { html, used: [], warning: "The model did not attach source markers to any claims." };
+  }
+
+  const list = references.map(index => {
+    const source = sources[index - 1];
+    return `<li><a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.title)}</a>${source.publisher ? ` — ${escapeHtml(source.publisher)}` : ""}</li>`;
+  }).join("");
+
+  html += `<hr><h2>Sources</h2><ol>${list}</ol>`;
+  return { html, used: references, warning: null };
+}
+
 async function generateArticleFromTopic(topicRow) {
   if (!geminiApiKey) throw new Error("GEMINI_API_KEY is not configured on Render.");
   if (!topicRow?.topic) throw new Error("No queued topic was provided.");
@@ -532,6 +566,14 @@ Editorial rules:
 - Do not copy source wording. Paraphrase and synthesize.
 - Do not fabricate quotations.
 - Do not present an old source as a current development without making its date clear.
+- Do not make a factual claim about a company, product, study, statistic, person, event, market, law, or workplace trend unless the supplied research supports it.
+- Every externally verifiable factual claim in the article must end with a source marker such as [1], [2], or [3], using only the supplied SOURCE numbers.
+- Put the source marker immediately after the sentence or paragraph it supports.
+- If one claim is supported by multiple sources, use multiple markers, for example [1][3].
+- Never invent a source number.
+- Do not put source markers in headings.
+- Do not cite a source merely because it is topically related; use it only when it supports the claim.
+- Analysis, opinion, recommendations, and clearly signposted interpretation do not require a source marker, but factual premises inside them do.
 - The article is a draft for human review, not automatic publication.
 
 Return clean JSON only. The article body must be HTML suitable for inserting directly into a web article. Use <p>, <h2>, <h3>, <ul>, <li>, <strong>, and <em> where useful. Do not include a full HTML document.
@@ -562,13 +604,18 @@ Create:
 
   const { data: author } = await supabase.from("media_authors").select("id").eq("slug", "jabari").maybeSingle();
 
+  const citationResult = applySourceCitations(article.content, research);
+  if (citationResult.warning) {
+    console.warn("SOURCE CITATION WARNING:", citationResult.warning);
+  }
+
   const { data: saved, error: saveError } = await supabase
     .from("media_articles")
     .insert({
       title: article.title,
       slug,
       excerpt: article.excerpt,
-      content: article.content,
+      content: citationResult.html,
       category_id: category?.id || null,
       author_id: author?.id || null,
       status: "draft",
@@ -618,10 +665,10 @@ Create:
     status: "success",
     article_id: saved.id,
     topic_id: topicRow.id,
-    message: `Researched ${research.length} sources and generated draft: ${saved.title}`
+    message: `Researched ${research.length} sources, cited ${citationResult.used.length} sources, and generated draft: ${saved.title}`
   });
 
-  return { article: saved, tags, sources: research };
+  return { article: saved, tags, sources: research, citedSources: citationResult.used };
 }
 
 async function showAiWriterMenu(chatId, messageId) {
