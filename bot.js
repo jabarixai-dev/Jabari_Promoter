@@ -30,6 +30,7 @@ const googleRefreshToken = process.env.GOOGLE_REFRESH_TOKEN || "";
 const googleRedirectUri = process.env.GOOGLE_REDIRECT_URI || `${BASE_URL}/oauth2callback`;
 const geminiApiKey = process.env.GEMINI_API_KEY || "";
 const geminiModel = process.env.GEMINI_MODEL || "gemini-3.8-flash";
+const geminiFallbackModels = [geminiModel, "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"].filter((v,i,a) => v && a.indexOf(v) === i);
 
 const PROMOTION_LIMIT = 10;
 let contacts = [];
@@ -450,29 +451,50 @@ async function mediaResearch(topic) {
 async function generateMediaArticle(topicRow, sources) {
   if (!geminiApiKey) throw new Error("GEMINI_API_KEY is missing on Render.");
   const sourceText = sources.map((s,i) => `${i+1}. ${s.title}\nPublisher: ${s.publisher || "Unknown"}\nURL: ${s.url}\nPublished: ${s.published_at || "Unknown"}`).join("\n\n");
-  const prompt = `You are the senior writer for Jabari Media, a digital publication covering News, AI, Promotion, Crypto and Money.\n\nWrite a source-backed article about this topic:\n${topicRow.topic}\n\nResearch supplied by Jabari Media:\n${sourceText || "No usable sources were found."}\n\nRules:\n- Do not invent facts, quotes, statistics, dates or events.\n- If a claim cannot be supported by the supplied sources, phrase it as analysis or omit it.\n- Use only the supplied source URLs for factual citations.\n- Return clean HTML body content using p, h2, ul, li, strong and blockquote where appropriate.\n- Put citation markers such as [1], [2] immediately after claims.\n- Finish the body with <hr><h2>Sources</h2><ol> and include ONLY sources actually cited. Each source must be a direct URL from the supplied list, with target="_blank" rel="noopener noreferrer".\n- Keep the article readable and journalistic, not a generic AI essay.\n- Do not mention that you are an AI.\n\nReturn JSON with title, excerpt, content, seo_title, meta_description, tags. `;
+  const prompt = `You are the senior writer for Jabari Media, a digital publication covering News, AI, Promotion, Crypto and Money.\n\nWrite a source-backed article about this topic:\n${topicRow.topic}\n\nResearch supplied by Jabari Media:\n${sourceText || "No usable sources were found."}\n\nRules:\n- Do not invent facts, quotes, statistics, dates or events.\n- If a claim cannot be supported by the supplied sources, phrase it as analysis or omit it.\n- Use only the supplied source URLs for factual citations.\n- Return clean HTML body content using p, h2, ul, li, strong and blockquote where appropriate.\n- Put citation markers such as [1], [2] immediately after claims.\n- Finish the body with <hr><h2>Sources</h2><ol> and include ONLY sources actually cited. Each source must be a direct URL from the supplied list, with target="_blank" rel="noopener noreferrer".\n- Keep the article readable and journalistic, not a generic AI essay.\n- Do not mention that you are an AI.\n\nReturn JSON with title, excerpt, content, seo_title, meta_description, tags.`;
+
   let lastError = null;
-  for (const delay of [0, 3000, 7000, 15000]) {
-    if (delay) await new Promise(r => setTimeout(r, delay));
-    try {
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(geminiModel)}:generateContent`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-goog-api-key": geminiApiKey },
-        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: {
-          temperature: 0.65, maxOutputTokens: 6500, responseMimeType: "application/json",
-          responseSchema: { type: "OBJECT", properties: {
-            title:{type:"STRING"}, excerpt:{type:"STRING"}, content:{type:"STRING"}, seo_title:{type:"STRING"}, meta_description:{type:"STRING"}, tags:{type:"ARRAY",items:{type:"STRING"}}
-          }, required:["title","excerpt","content","seo_title","meta_description","tags"] }
-        }})
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data?.error?.message || `Gemini HTTP ${response.status}`);
-      const raw = data?.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("").trim();
-      if (!raw) throw new Error("Gemini returned an empty response.");
-      return JSON.parse(raw);
-    } catch (e) { lastError = e; console.error("Gemini media generation attempt failed:", e.message); }
+  for (const model of geminiFallbackModels) {
+    for (const delay of [0, 3000, 7000]) {
+      if (delay) await new Promise(r => setTimeout(r, delay));
+      try {
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-goog-api-key": geminiApiKey },
+          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: {
+            maxOutputTokens: 6500, responseMimeType: "application/json",
+            responseSchema: { type: "OBJECT", properties: {
+              title:{type:"STRING"}, excerpt:{type:"STRING"}, content:{type:"STRING"}, seo_title:{type:"STRING"}, meta_description:{type:"STRING"}, tags:{type:"ARRAY",items:{type:"STRING"}}
+            }, required:["title","excerpt","content","seo_title","meta_description","tags"]
+          }}})
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          const err = new Error(data?.error?.message || `Gemini HTTP ${response.status}`);
+          err.status = response.status;
+          throw err;
+        }
+        const raw = data?.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("").trim();
+        if (!raw) throw new Error("Gemini returned an empty response.");
+        return JSON.parse(raw);
+      } catch (e) {
+        lastError = e;
+        console.error(`Gemini media generation failed on ${model}:`, e.message);
+        const msg = String(e?.message || "").toLowerCase();
+        const status = Number(e?.status || 0);
+        const transient = status === 429 || status === 500 || status === 503 || /high demand|temporarily|overloaded|rate limit|too many requests|unavailable/.test(msg);
+        if (!transient) throw e;
+        break;
+      }
+    }
   }
   throw lastError || new Error("Article generation failed.");
+}
+
+function isTransientGeminiError(error) {
+  const msg = String(error?.message || "").toLowerCase();
+  const status = Number(error?.status || 0);
+  return status === 429 || status === 500 || status === 503 || /high demand|temporarily|overloaded|rate limit|too many requests|service unavailable|unavailable/.test(msg);
 }
 
 async function saveMediaSources(articleId, sources, content) {
@@ -509,8 +531,9 @@ async function createMediaDraftFromTopic(topicOverride = null) {
     await supabase.from("media_automation_logs").insert({ action:"generate_article", status:"success", article_id:saved.id, topic_id:topic.id, message:`Draft created from topic: ${topic.topic}` });
     return { topic, article: saved, sources };
   } catch (e) {
-    await supabase.from("media_topics").update({ status: "failed" }).eq("id", topic.id);
-    await supabase.from("media_automation_logs").insert({ action:"generate_article", status:"failed", topic_id:topic.id, message:e.message });
+    const nextStatus = isTransientGeminiError(e) ? "queued" : "failed";
+    await supabase.from("media_topics").update({ status: nextStatus }).eq("id", topic.id);
+    await supabase.from("media_automation_logs").insert({ action:"generate_article", status: nextStatus === "queued" ? "retryable" : "failed", topic_id:topic.id, message:e.message });
     throw e;
   }
 }
@@ -1019,14 +1042,20 @@ bot.on("callback_query", async q => {
 📧 Promotion: ${r.promotion.sent} sent, ${r.promotion.failed} failed` : "";
       return bot.sendMessage(chatId, r.article ? `✅ ${r.message}${detail}` : `ℹ️ ${r.message}`, {reply_markup:{inline_keyboard:[[btn("📝 Drafts","media_drafts")],[btn("🤖 Media","menu_media")]]}});
     }
-    if (data === "media_generate") {
-      await safeEdit(chatId,messageId,"✍️ Generating the next article…\n\nJabari will research the topic first.");
-      const r = await runMediaAutomation(chatId,"manual");
-      return bot.sendMessage(chatId, r.article ? `✅ Draft created.
+    if (data === "media_generate" || data === "media_generate_retry") {
+      await safeEdit(chatId,messageId,"✍️ Generating the next article…\n\nJabari will research the topic first.\n\nIf Gemini is temporarily busy, Jabari will retry automatically and can offer another retry button.");
+      try {
+        const r = await runMediaAutomation(chatId,"manual");
+        return bot.sendMessage(chatId, r.article ? `✅ Draft created.
 
 ${r.article.title}
 
 Status: Draft` : `ℹ️ ${r.message}`, {reply_markup:{inline_keyboard:[[btn("📝 Drafts","media_drafts")],[btn("🤖 Media","menu_media")]]}});
+      } catch (e) {
+        console.error("MEDIA GENERATION FAILED:", e.message);
+        const retryable = isTransientGeminiError(e);
+        return bot.sendMessage(chatId, `❌ Article generation failed.\n\n${e.message}${retryable ? "\n\nGemini is temporarily under load. Your topic has been kept in the queue." : ""}`, {reply_markup:{inline_keyboard:[...(retryable ? [[btn("🔄 Retry", "media_generate_retry")]] : []),[btn("🤖 Media","menu_media")]]}});
+      }
     }
     if (data === "media_drafts") return showMediaDrafts(chatId,messageId);
     if (data.startsWith("media_draft:")) {
@@ -1083,22 +1112,20 @@ ${t.topic}
 
 Status: ${t.status}`,{inline_keyboard:[[btn("✍️ Generate","media_generate_topic:"+id)],[btn("🗑️ Delete","media_topic_delete:"+id)],[btn("⬅️ Topics","media_topics")]]});
     }
-    if (data.startsWith("media_generate_topic:")) {
+    if (data.startsWith("media_generate_topic:") || data.startsWith("media_generate_topic_retry:")) {
+      const retryTopic = data.startsWith("media_generate_topic_retry:");
       const id=Number(data.split(":")[1]);
       const {data:t,error}=await supabase.from("media_topics").select("id,topic,category_id,status").eq("id",id).single();
       if(error) throw error;
-      if(t.status!=="queued") return safeEdit(chatId,messageId,`This topic is not queued.
-
-Status: ${t.status}`,{inline_keyboard:[[btn("⬅️ Topics","media_topics")]]});
-      await safeEdit(chatId,messageId,`✍️ Generating…
-
-Researching the selected topic first.`);
-      const result=await createMediaDraftFromTopic(t);
-      return bot.sendMessage(chatId,`✅ Draft created.
-
-${result.article.title}
-
-Status: Draft`,{reply_markup:{inline_keyboard:[[btn("📝 Drafts","media_drafts")],[btn("🤖 Media","menu_media")]]}});
+      if(t.status!=="queued") return safeEdit(chatId,messageId,`This topic is not queued.\n\nStatus: ${t.status}`,{inline_keyboard:[[btn("⬅️ Topics","media_topics")]]});
+      await safeEdit(chatId,messageId,`✍️ Generating…\n\nResearching the selected topic first.`);
+      try {
+        const result=await createMediaDraftFromTopic(t);
+        return bot.sendMessage(chatId,`✅ Draft created.\n\n${result.article.title}\n\nStatus: Draft`,{reply_markup:{inline_keyboard:[[btn("📝 Drafts","media_drafts")],[btn("🤖 Media","menu_media")]]}});
+      } catch (e) {
+        const retryable = isTransientGeminiError(e);
+        return bot.sendMessage(chatId,`❌ Article generation failed.\n\n${e.message}${retryable ? "\n\nYour topic has been kept in the queue." : ""}`,{reply_markup:{inline_keyboard:[...(retryable ? [[btn("🔄 Retry",`media_generate_topic_retry:${id}`)]] : []),[btn("⬅️ Topics","media_topics")]]}});
+      }
     }
     if (data.startsWith("media_topic_delete:")) {
       const id=Number(data.split(":")[1]);
