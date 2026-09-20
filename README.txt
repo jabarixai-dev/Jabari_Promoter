@@ -1,19 +1,34 @@
-Jabari Gemini Integration v2
+Jabari Gemini Research + Writer v3
 
-What changed:
-- Added automatic retry for temporary Gemini 429/500/503/504 errors.
-- Retry delays: 3s, 7s, 15s.
-- Added automatic model fallback if the primary model remains unavailable.
-- Fallback order: GEMINI_MODEL -> GEMINI_FALLBACK_MODEL (default gemini-3.7-flash) -> gemini-3.6-flash.
+WHAT THIS VERSION ADDS
+- Keeps the working Gemini retry + fallback system.
+- Adds a free public-web research layer using Google News RSS.
+- Finds up to 6 recent public news/search results for each topic.
+- Attempts to fetch each source page and extracts readable text when available.
+- Sends the research material to Gemini before writing the article.
+- Saves the discovered source records into media_sources.
+- Saves generated tags into media_tags and media_article_tags.
+- Keeps the article as DRAFT. It is not auto-published.
+- Marks the topic as used only after the article is saved.
+
+IMPORTANT
 - No new npm package is required.
-- Existing Telegram, Gmail, Supabase, campaigns, contacts, and scanner code is preserved.
+- Do not change or remove your existing Render environment variables.
+- Do not add your Gemini API key to the code.
+- Do not turn Autopilot on yet.
+- Research is not a guarantee that every source page can be fetched; some sites block automated requests. The bot still keeps the RSS title/summary/source URL when available.
+- The research layer uses public RSS/search results rather than Gemini Google Search grounding, so it does not require enabling a paid Gemini grounding feature.
 
-Deployment:
-1. Replace the existing bot.js in the GitHub repository with this bot.js.
+INSTALL
+1. Replace your current bot.js in GitHub with the bot.js in this ZIP.
 2. Commit the change.
 3. Let Render redeploy.
-4. Do not change or delete existing environment variables.
-5. GEMINI_FALLBACK_MODEL is optional; you do not need to add it.
-6. Test Telegram -> /start -> AI Writer -> Generate Draft.
+4. Telegram -> /start -> AI Writer -> Generate Draft.
 
-The article is still saved as a draft and is NOT automatically published.
+EXPECTED RESULT
+The bot should show:
+- Draft created
+- Status: Draft
+- Research sources saved: N
+
+Then open the Jabari Media Admin dashboard and review the article and its sources before publishing.

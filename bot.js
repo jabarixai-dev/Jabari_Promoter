@@ -340,6 +340,81 @@ async function getNextMediaTopic() {
   return data || null;
 }
 
+
+function decodeXml(value) {
+  return String(value || "")
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+function stripHtml(value) {
+  return String(value || "")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractRssItems(xml) {
+  const items = [];
+  const matches = xml.match(/<item>[\s\S]*?<\/item>/gi) || [];
+  for (const item of matches) {
+    const title = decodeXml((item.match(/<title>([\s\S]*?)<\/title>/i) || [])[1]);
+    const link = decodeXml((item.match(/<link>([\s\S]*?)<\/link>/i) || [])[1]);
+    const description = decodeXml((item.match(/<description>([\s\S]*?)<\/description>/i) || [])[1]);
+    const pubDate = decodeXml((item.match(/<pubDate>([\s\S]*?)<\/pubDate>/i) || [])[1]);
+    const source = decodeXml((item.match(/<source[^>]*>([\s\S]*?)<\/source>/i) || [])[1]);
+    if (!title || !link) continue;
+    items.push({
+      title,
+      url: link,
+      description: stripHtml(description).slice(0, 1200),
+      publisher: source || "Unknown publisher",
+      published_at: pubDate ? new Date(pubDate).toISOString() : null
+    });
+  }
+  return items;
+}
+
+async function researchTopic(topic) {
+  const query = `${topic} latest developments facts analysis`;
+  const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-US&gl=US&ceid=US:en`;
+  const response = await fetch(rssUrl, {
+    headers: { "User-Agent": "Jabari-Media/1.0" }
+  });
+  if (!response.ok) throw new Error(`Research search returned HTTP ${response.status}.`);
+  const xml = await response.text();
+  const items = extractRssItems(xml).slice(0, 6);
+  if (!items.length) throw new Error("Research search returned no usable sources.");
+
+  const enriched = [];
+  for (const item of items) {
+    let pageText = "";
+    try {
+      const pageResponse = await fetch(item.url, {
+        headers: { "User-Agent": "Mozilla/5.0 Jabari-Media/1.0" },
+        redirect: "follow"
+      });
+      if (pageResponse.ok) {
+        const contentType = pageResponse.headers.get("content-type") || "";
+        if (contentType.includes("text/html")) {
+          const html = await pageResponse.text();
+          pageText = stripHtml(html).slice(0, 5000);
+        }
+      }
+    } catch (e) {
+      console.warn("Research source fetch failed:", item.url, e.message);
+    }
+    enriched.push({ ...item, page_text: pageText });
+  }
+  return enriched;
+}
+
 async function requestGeminiArticle(prompt) {
   const models = [
     geminiModel,
@@ -429,7 +504,45 @@ async function generateArticleFromTopic(topicRow) {
   if (!geminiApiKey) throw new Error("GEMINI_API_KEY is not configured on Render.");
   if (!topicRow?.topic) throw new Error("No queued topic was provided.");
 
-  const prompt = `You are the editorial writer for Jabari Media, an independent digital publication covering News, AI, Promotion, Crypto and Money.\n\nWrite a high-quality article based on this topic:\n\n${topicRow.topic}\n\nThis is a FIRST DRAFT only. Do not claim that you verified current facts or cite sources you did not actually receive. Do not invent statistics, quotes, names, dates, studies, product capabilities, or breaking-news details. If the topic depends on current facts, phrase uncertain points cautiously so a human editor can verify them before publication.\n\nReturn clean JSON only. The article body must be HTML suitable for inserting directly into a web article. Use <p>, <h2>, <h3>, <ul>, <li>, <strong>, and <em> where useful. Do not include a full HTML document.\n\nCreate:\n- title: strong editorial headline\n- excerpt: 1-2 sentence summary\n- content: substantial readable article body with a clear introduction and useful sections\n- seo_title: concise SEO title\n- meta_description: concise search description\n- tags: 3-6 short relevant tags`;
+  const research = await researchTopic(topicRow.topic);
+  const researchPacket = research.map((item, index) => [
+    `SOURCE ${index + 1}`,
+    `Title: ${item.title}`,
+    `Publisher: ${item.publisher}`,
+    `Published: ${item.published_at || "Unknown"}`,
+    `URL: ${item.url}`,
+    `Summary: ${item.description || ""}`,
+    `Page text: ${item.page_text || "Not available"}`
+  ].join("\n")).join("\n\n");
+
+  const prompt = `You are the editorial writer for Jabari Media, an independent digital publication covering News, AI, Promotion, Crypto and Money.
+
+Write a high-quality article based on this topic:
+
+${topicRow.topic}
+
+You have been given fresh public-web research below. Use it as research material, but do not blindly trust it. Cross-check claims across the supplied material when possible. Do not invent statistics, quotes, names, dates, studies, product capabilities, or events. Never claim you personally verified a fact beyond the supplied research.
+
+RESEARCH MATERIAL:
+${researchPacket}
+
+Editorial rules:
+- Distinguish established facts from analysis or forward-looking interpretation.
+- If sources disagree or evidence is incomplete, write cautiously and make the uncertainty clear.
+- Do not copy source wording. Paraphrase and synthesize.
+- Do not fabricate quotations.
+- Do not present an old source as a current development without making its date clear.
+- The article is a draft for human review, not automatic publication.
+
+Return clean JSON only. The article body must be HTML suitable for inserting directly into a web article. Use <p>, <h2>, <h3>, <ul>, <li>, <strong>, and <em> where useful. Do not include a full HTML document.
+
+Create:
+- title: strong editorial headline
+- excerpt: 1-2 sentence summary
+- content: substantial readable article body with a clear introduction and useful sections
+- seo_title: concise SEO title
+- meta_description: concise search description
+- tags: 3-6 short relevant tags`;
 
   const responseJson = await requestGeminiArticle(prompt);
   const raw = responseJson?.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("").trim();
@@ -467,6 +580,33 @@ async function generateArticleFromTopic(topicRow) {
     .single();
   if (saveError) throw saveError;
 
+  for (const source of research) {
+    const { error: sourceError } = await supabase.from("media_sources").insert({
+      article_id: saved.id,
+      title: source.title,
+      url: source.url,
+      publisher: source.publisher,
+      published_at: source.published_at
+    });
+    if (sourceError) console.error("Could not save research source:", sourceError.message);
+  }
+
+  const tags = Array.isArray(article.tags) ? article.tags : [];
+  for (const rawTag of tags.slice(0, 6)) {
+    const name = String(rawTag || "").trim();
+    if (!name) continue;
+    const tagSlug = slugify(name).slice(0, 60);
+    if (!tagSlug) continue;
+    const { data: tag, error: tagError } = await supabase
+      .from("media_tags")
+      .upsert({ name, slug: tagSlug }, { onConflict: "slug" })
+      .select("id")
+      .single();
+    if (tagError || !tag) continue;
+    await supabase.from("media_article_tags")
+      .upsert({ article_id: saved.id, tag_id: tag.id }, { onConflict: "article_id,tag_id" });
+  }
+
   const { error: topicError } = await supabase
     .from("media_topics")
     .update({ status: "published", used_at: new Date().toISOString() })
@@ -474,14 +614,14 @@ async function generateArticleFromTopic(topicRow) {
   if (topicError) console.error("Could not mark topic as used:", topicError.message);
 
   await supabase.from("media_automation_logs").insert({
-    action: "generate_article",
+    action: "research_and_generate_article",
     status: "success",
     article_id: saved.id,
     topic_id: topicRow.id,
-    message: `Generated draft: ${saved.title}`
+    message: `Researched ${research.length} sources and generated draft: ${saved.title}`
   });
 
-  return { article: saved, tags: Array.isArray(article.tags) ? article.tags : [] };
+  return { article: saved, tags, sources: research };
 }
 
 async function showAiWriterMenu(chatId, messageId) {
