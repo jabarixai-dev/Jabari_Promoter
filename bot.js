@@ -457,6 +457,26 @@ function mediaSlugify(value) {
   return String(value || "").toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 120) || `article-${Date.now()}`;
 }
 
+async function resolveDirectSourceUrl(url) {
+  try {
+    const u = new URL(url);
+    if (!/news\.google\.com$/i.test(u.hostname)) return url;
+    const response = await fetch(url, {
+      method: "GET",
+      redirect: "follow",
+      headers: { "User-Agent": "JabariMedia/1.0" }
+    });
+    const finalUrl = response.url || url;
+    if (response.body && typeof response.body.cancel === "function") {
+      try { await response.body.cancel(); } catch {}
+    }
+    const finalHost = new URL(finalUrl).hostname;
+    return /news\.google\.com$/i.test(finalHost) ? url : finalUrl;
+  } catch {
+    return url;
+  }
+}
+
 async function mediaResearch(topic) {
   const q = encodeURIComponent(`${topic} 2026`);
   const url = `https://news.google.com/rss/search?q=${q}&hl=en-US&gl=US&ceid=US:en`;
@@ -464,19 +484,79 @@ async function mediaResearch(topic) {
   if (!response.ok) throw new Error(`Research search failed with HTTP ${response.status}.`);
   const xml = await response.text();
   const items = [...xml.matchAll(/<item>([\s\S]*?)<\/item>/gi)].slice(0, 8).map(m => m[1]);
-  const clean = value => String(value || "").replace(/<!\[CDATA\[([\\s\\S]*?)\]\]>/g, "$1").replace(/<[^>]+>/g, "").replace(/&amp;/g,"&").replace(/&quot;/g,'"').replace(/&#39;/g,"'").trim();
-  return items.map(item => ({
+  const clean = value => String(value || "").replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1").replace(/<[^>]+>/g, "").replace(/&amp;/g,"&").replace(/&quot;/g,'"').replace(/&#39;/g,"'").trim();
+  const raw = items.map(item => ({
     title: clean(item.match(/<title>([\s\S]*?)<\/title>/i)?.[1]),
     url: clean(item.match(/<link>([\s\S]*?)<\/link>/i)?.[1]),
     published_at: clean(item.match(/<pubDate>([\s\S]*?)<\/pubDate>/i)?.[1]),
     publisher: clean(item.match(/<source[^>]*>([\s\S]*?)<\/source>/i)?.[1])
   })).filter(x => x.title && x.url);
+
+  const resolved = [];
+  for (const item of raw) {
+    const directUrl = await resolveDirectSourceUrl(item.url);
+    resolved.push({ ...item, url: directUrl });
+  }
+  return resolved;
+}
+
+function extractCitationIds(content, sourceCount) {
+  const ids = [...String(content || "").matchAll(/\[(\d+)\]/g)].map(m => Number(m[1]));
+  return [...new Set(ids)].filter(n => Number.isInteger(n) && n >= 1 && n <= sourceCount);
+}
+
+function extractInvalidCitationIds(content, sourceCount) {
+  return [...new Set([...String(content || "").matchAll(/\[(\d+)\]/g)].map(m => Number(m[1])).filter(n => !Number.isInteger(n) || n < 1 || n > sourceCount))];
+}
+
+function stripGeneratedSourcesSection(content) {
+  return String(content || "")
+    .replace(/<hr\s*\/?>\s*<h2[^>]*>\s*Sources\s*<\/h2>[\s\S]*$/i, "")
+    .trim();
+}
+
+function normalizeCitationsAndBuildSources(content, sources) {
+  const body = stripGeneratedSourcesSection(content);
+  const invalid = extractInvalidCitationIds(body, sources.length);
+  if (invalid.length) {
+    throw new Error(`Citation validation failed: ${invalid.map(n => `[${n}]`).join(", ")} do not match the supplied research sources.`);
+  }
+
+  const citedIds = extractCitationIds(body, sources.length);
+  if (!citedIds.length) {
+    throw new Error("Citation validation failed: the generated article contains no source citations.");
+  }
+
+  const numberMap = new Map(citedIds.map((sourceId, index) => [sourceId, index + 1]));
+  const normalizedBody = body.replace(/\[(\d+)\]/g, (match, rawId) => {
+    const sourceId = Number(rawId);
+    return numberMap.has(sourceId) ? `[${numberMap.get(sourceId)}]` : match;
+  });
+
+  const sourceItems = citedIds.map((sourceId, index) => {
+    const source = sources[sourceId - 1];
+    const safeTitle = escapeHtml(source.title || source.publisher || `Source ${index + 1}`);
+    const safePublisher = source.publisher ? ` — ${escapeHtml(source.publisher)}` : "";
+    const safeUrl = escapeAttribute(source.url);
+    return `<li><a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${safeTitle}${safePublisher}</a></li>`;
+  }).join("");
+
+  return `${normalizedBody}\n\n<hr><h2>Sources</h2><ol>${sourceItems}</ol>`;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[char]));
+}
+
+function escapeAttribute(value) {
+  return escapeHtml(value).replace(/`/g, "&#096;");
 }
 
 async function generateMediaArticle(topicRow, sources) {
   if (!geminiApiKey) throw new Error("GEMINI_API_KEY is missing on Render.");
+  if (!sources.length) throw new Error("No usable research sources were found.");
   const sourceText = sources.map((s,i) => `${i+1}. ${s.title}\nPublisher: ${s.publisher || "Unknown"}\nURL: ${s.url}\nPublished: ${s.published_at || "Unknown"}`).join("\n\n");
-  const prompt = `You are the senior writer for Jabari Media, a digital publication covering News, AI, Promotion, Crypto and Money.\n\nWrite a source-backed article about this topic:\n${topicRow.topic}\n\nResearch supplied by Jabari Media:\n${sourceText || "No usable sources were found."}\n\nRules:\n- Do not invent facts, quotes, statistics, dates or events.\n- If a claim cannot be supported by the supplied sources, phrase it as analysis or omit it.\n- Use only the supplied source URLs for factual citations.\n- Return clean HTML body content using p, h2, ul, li, strong and blockquote where appropriate.\n- Put citation markers such as [1], [2] immediately after claims.\n- Finish the body with <hr><h2>Sources</h2><ol> and include ONLY sources actually cited. Each source must be a direct URL from the supplied list, with target="_blank" rel="noopener noreferrer".\n- Keep the article readable and journalistic, not a generic AI essay.\n- Do not mention that you are an AI.\n\nReturn JSON with title, excerpt, content, seo_title, meta_description, tags.`;
+  const prompt = `You are the senior writer for Jabari Media, a digital publication covering News, AI, Promotion, Crypto and Money.\n\nWrite a source-backed article about this topic:\n${topicRow.topic}\n\nResearch supplied by Jabari Media:\n${sourceText}\n\nRules:\n- Do not invent facts, quotes, statistics, dates or events.\n- If a claim cannot be supported by the supplied sources, phrase it as analysis or omit it.\n- Use only the supplied source numbers for factual citations.\n- A citation [N] means exactly source N from the supplied research list.\n- Put citation markers such as [1], [2] immediately after the claims they support.\n- Do NOT create a Sources section, source list, bibliography, or any links in the article body. Jabari will build the Sources section itself from the citations you use.\n- Do not use citation numbers outside 1-${sources.length}.\n- Return clean HTML body content using p, h2, ul, li, strong and blockquote where appropriate.\n- Keep the article readable and journalistic, not a generic AI essay.\n- Do not mention that you are an AI.\n\nReturn JSON with title, excerpt, content, seo_title, meta_description, tags.`;
 
   let lastError = null;
   for (const model of geminiFallbackModels) {
@@ -486,12 +566,25 @@ async function generateMediaArticle(topicRow, sources) {
         const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "x-goog-api-key": geminiApiKey },
-          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: {
-            maxOutputTokens: 6500, responseMimeType: "application/json",
-            responseSchema: { type: "OBJECT", properties: {
-              title:{type:"STRING"}, excerpt:{type:"STRING"}, content:{type:"STRING"}, seo_title:{type:"STRING"}, meta_description:{type:"STRING"}, tags:{type:"ARRAY",items:{type:"STRING"}}
-            }, required:["title","excerpt","content","seo_title","meta_description","tags"]
-          }}})
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: {
+              maxOutputTokens: 6500,
+              responseMimeType: "application/json",
+              responseSchema: {
+                type: "OBJECT",
+                properties: {
+                  title: { type: "STRING" },
+                  excerpt: { type: "STRING" },
+                  content: { type: "STRING" },
+                  seo_title: { type: "STRING" },
+                  meta_description: { type: "STRING" },
+                  tags: { type: "ARRAY", items: { type: "STRING" } }
+                },
+                required: ["title", "excerpt", "content", "seo_title", "meta_description", "tags"]
+              }
+            }
+          })
         });
         const data = await response.json();
         if (!response.ok) {
@@ -501,7 +594,9 @@ async function generateMediaArticle(topicRow, sources) {
         }
         const raw = data?.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("").trim();
         if (!raw) throw new Error("Gemini returned an empty response.");
-        return JSON.parse(raw);
+        const article = JSON.parse(raw);
+        article.content = normalizeCitationsAndBuildSources(article.content, sources);
+        return article;
       } catch (e) {
         lastError = e;
         console.error(`Gemini media generation failed on ${model}:`, e.message);
@@ -529,7 +624,8 @@ async function saveMediaSources(articleId, sources, content) {
   for (const n of unique) {
     const s = sources[n - 1];
     used.push(s);
-    await supabase.from("media_sources").insert({ article_id: articleId, title: s.title, url: s.url, publisher: s.publisher || null, published_at: s.published_at ? new Date(s.published_at).toISOString() : null });
+    const { error } = await supabase.from("media_sources").insert({ article_id: articleId, title: s.title, url: s.url, publisher: s.publisher || null, published_at: s.published_at ? new Date(s.published_at).toISOString() : null });
+    if (error) throw error;
   }
   return used;
 }
