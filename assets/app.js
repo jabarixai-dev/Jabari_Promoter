@@ -16,7 +16,7 @@ const esc = (value) =>
 
 async function api(path) {
   if (!supabaseReady) {
-    throw new Error("Supabase is not configured.");
+    throw new Error("Supabase URL or publishable key is missing.");
   }
 
   const response = await fetch(
@@ -28,14 +28,38 @@ async function api(path) {
     }
   );
 
+  const responseText = await response.text();
+
   if (!response.ok) {
-    const errorText = await response.text().catch(() => "");
     throw new Error(
-      `Supabase request failed: ${response.status} ${errorText}`
+      `HTTP ${response.status}: ${responseText || "No error message returned"}`
     );
   }
 
-  return response.json();
+  try {
+    return JSON.parse(responseText);
+  } catch {
+    throw new Error(
+      `Supabase returned an invalid response: ${responseText}`
+    );
+  }
+}
+
+function showError(error) {
+  console.error("Jabari Media error:", error);
+
+  const message = esc(error?.message || String(error));
+
+  document
+    .querySelectorAll(".grid, #latest, #grid, #results, #article")
+    .forEach((element) => {
+      element.innerHTML = `
+        <div class="error-box">
+          <strong>Supabase connection error</strong>
+          <p>${message}</p>
+        </div>
+      `;
+    });
 }
 
 function card(article) {
@@ -63,7 +87,7 @@ async function loadHome() {
 
   if (!latest) return;
 
-  latest.innerHTML = "<p>Loading stories…</p>";
+  latest.innerHTML = "<p>Testing Supabase connection…</p>";
 
   const articles = await api(
     "media_articles" +
@@ -75,7 +99,7 @@ async function loadHome() {
 
   latest.innerHTML = articles.length
     ? articles.map(card).join("")
-    : "<p>No published stories yet.</p>";
+    : "<p>Supabase connected successfully. No published stories yet.</p>";
 }
 
 async function loadCategory() {
@@ -88,15 +112,13 @@ async function loadCategory() {
   const category =
     new URLSearchParams(location.search).get("category") || "News";
 
-  if (title) {
-    title.textContent = category;
-  }
+  if (title) title.textContent = category;
 
   if (description) {
     description.textContent = `Stories from ${category}.`;
   }
 
-  grid.innerHTML = "<p>Loading stories…</p>";
+  grid.innerHTML = "<p>Testing Supabase connection…</p>";
 
   const articles = await api(
     "media_articles" +
@@ -114,7 +136,7 @@ async function loadCategory() {
 
   grid.innerHTML = filtered.length
     ? filtered.map(card).join("")
-    : "<p>No published stories yet.</p>";
+    : `<p>Supabase connected. No published ${esc(category)} stories yet.</p>`;
 }
 
 async function loadArticle() {
@@ -129,7 +151,7 @@ async function loadArticle() {
     return;
   }
 
-  articleContainer.innerHTML = "<p>Loading article…</p>";
+  articleContainer.innerHTML = "<p>Testing Supabase connection…</p>";
 
   const articles = await api(
     "media_articles" +
@@ -141,7 +163,8 @@ async function loadArticle() {
   const article = articles[0];
 
   if (!article) {
-    articleContainer.innerHTML = "<p>Article not found.</p>";
+    articleContainer.innerHTML =
+      "<p>Supabase connected, but this article does not exist.</p>";
     return;
   }
 
@@ -150,11 +173,8 @@ async function loadArticle() {
   articleContainer.innerHTML = `
     <section class="articlehead">
       <small>${esc(article.media_categories?.name || "Jabari")}</small>
-
       <h1>${esc(article.title)}</h1>
-
       <p>${esc(article.excerpt || "")}</p>
-
       ${
         article.media_authors?.name
           ? `<small>By ${esc(article.media_authors.name)}</small>`
@@ -236,7 +256,9 @@ async function run() {
       location.pathname.split("/").pop() || "index.html";
 
     if (!supabaseReady) {
-      throw new Error("Supabase configuration is missing.");
+      throw new Error(
+        "Supabase configuration is missing. Check assets/config.js."
+      );
     }
 
     if (page === "index.html") {
@@ -255,18 +277,7 @@ async function run() {
       await setupSearch();
     }
   } catch (error) {
-    console.error("Jabari Media error:", error);
-
-    document
-      .querySelectorAll(".grid, .article, #latest, #grid, #results")
-      .forEach((element) => {
-        element.innerHTML = `
-          <p>
-            Unable to load stories right now.
-            Please try again shortly.
-          </p>
-        `;
-      });
+    showError(error);
   }
 }
 
