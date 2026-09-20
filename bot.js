@@ -340,46 +340,98 @@ async function getNextMediaTopic() {
   return data || null;
 }
 
+async function requestGeminiArticle(prompt) {
+  const models = [
+    geminiModel,
+    process.env.GEMINI_FALLBACK_MODEL || "gemini-3.7-flash",
+    "gemini-3.6-flash"
+  ].filter((model, index, list) => model && list.indexOf(model) === index);
+
+  const delays = [3000, 7000, 15000];
+  let lastError = null;
+
+  for (const model of models) {
+    for (let attempt = 0; attempt < delays.length + 1; attempt++) {
+      if (attempt > 0) {
+        await new Promise(resolve => setTimeout(resolve, delays[attempt - 1]));
+      }
+
+      try {
+        console.log(`GEMINI REQUEST: model=${model}, attempt=${attempt + 1}`);
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": geminiApiKey
+          },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: {
+              temperature: 0.7,
+              maxOutputTokens: 5000,
+              responseMimeType: "application/json",
+              responseSchema: {
+                type: "OBJECT",
+                properties: {
+                  title: { type: "STRING" },
+                  excerpt: { type: "STRING" },
+                  content: { type: "STRING" },
+                  seo_title: { type: "STRING" },
+                  meta_description: { type: "STRING" },
+                  tags: { type: "ARRAY", items: { type: "STRING" } }
+                },
+                required: ["title", "excerpt", "content", "seo_title", "meta_description", "tags"]
+              }
+            }
+          })
+        });
+
+        const responseJson = await response.json();
+
+        if (response.ok) {
+          return responseJson;
+        }
+
+        const apiMessage = responseJson?.error?.message || `Gemini API returned HTTP ${response.status}.`;
+        const apiCode = responseJson?.error?.status || responseJson?.error?.code || "";
+        lastError = new Error(apiMessage);
+        lastError.status = response.status;
+        lastError.apiCode = apiCode;
+
+        const retryable = response.status === 429 || response.status === 500 || response.status === 503 || response.status === 504;
+        const modelUnavailable = response.status === 404;
+
+        console.error("GEMINI API ERROR:", {
+          model,
+          attempt: attempt + 1,
+          status: response.status,
+          code: apiCode,
+          message: apiMessage
+        });
+
+        if (modelUnavailable) break;
+        if (!retryable) throw lastError;
+      } catch (error) {
+        lastError = error;
+        const retryableNetwork = !error?.status || [429, 500, 503, 504].includes(error.status);
+        if (!retryableNetwork) throw error;
+        console.error(`Gemini request failed for ${model}, attempt ${attempt + 1}:`, error?.message || error);
+      }
+    }
+
+    console.log(`GEMINI FALLBACK: switching away from ${model}`);
+  }
+
+  throw lastError || new Error("Gemini request failed after retries and fallback models.");
+}
+
 async function generateArticleFromTopic(topicRow) {
   if (!geminiApiKey) throw new Error("GEMINI_API_KEY is not configured on Render.");
   if (!topicRow?.topic) throw new Error("No queued topic was provided.");
 
   const prompt = `You are the editorial writer for Jabari Media, an independent digital publication covering News, AI, Promotion, Crypto and Money.\n\nWrite a high-quality article based on this topic:\n\n${topicRow.topic}\n\nThis is a FIRST DRAFT only. Do not claim that you verified current facts or cite sources you did not actually receive. Do not invent statistics, quotes, names, dates, studies, product capabilities, or breaking-news details. If the topic depends on current facts, phrase uncertain points cautiously so a human editor can verify them before publication.\n\nReturn clean JSON only. The article body must be HTML suitable for inserting directly into a web article. Use <p>, <h2>, <h3>, <ul>, <li>, <strong>, and <em> where useful. Do not include a full HTML document.\n\nCreate:\n- title: strong editorial headline\n- excerpt: 1-2 sentence summary\n- content: substantial readable article body with a clear introduction and useful sections\n- seo_title: concise SEO title\n- meta_description: concise search description\n- tags: 3-6 short relevant tags`;
 
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(geminiModel)}:generateContent`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-goog-api-key": geminiApiKey
-    },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0.7,
-        maxOutputTokens: 5000,
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: "OBJECT",
-          properties: {
-            title: { type: "STRING" },
-            excerpt: { type: "STRING" },
-            content: { type: "STRING" },
-            seo_title: { type: "STRING" },
-            meta_description: { type: "STRING" },
-            tags: { type: "ARRAY", items: { type: "STRING" } }
-          },
-          required: ["title", "excerpt", "content", "seo_title", "meta_description", "tags"]
-        }
-      }
-    })
-  });
-
-  const responseJson = await response.json();
-  if (!response.ok) {
-    const apiMessage = responseJson?.error?.message || `Gemini API returned HTTP ${response.status}.`;
-    throw new Error(apiMessage);
-  }
-
+  const responseJson = await requestGeminiArticle(prompt);
   const raw = responseJson?.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("").trim();
   if (!raw) throw new Error("Gemini returned an empty response.");
 
