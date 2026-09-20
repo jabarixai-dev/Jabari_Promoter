@@ -33,6 +33,8 @@ const geminiModel = process.env.GEMINI_MODEL || "gemini-3.8-flash";
 const geminiFallbackModels = [geminiModel, "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"].filter((v,i,a) => v && a.indexOf(v) === i);
 
 const PROMOTION_LIMIT = 10;
+const MEDIA_PROMOTION_TARGET = 50;
+const MEDIA_PROMOTION_BATCH = 5;
 let contacts = [];
 let inputState = null;
 let stats = { totalRuns: 0, totalSent: 0, totalFailed: 0, lastRun: null };
@@ -565,6 +567,7 @@ async function publishMediaArticle(id) {
   const { data, error } = await supabase.from("media_articles").update({ status:"published", published_at:new Date().toISOString(), updated_at:new Date().toISOString() }).eq("id", id).in("status", ["draft","review"]).select("*").single();
   if (error) throw error;
   await supabase.from("media_automation_logs").insert({ action:"publish_article", status:"success", article_id:id, message:`Published: ${data.title}` });
+  await ensureMediaPromotion(data);
   return data;
 }
 
@@ -587,6 +590,126 @@ async function prepareMediaPromotion(article) {
   return articleUrl;
 }
 
+
+async function ensureMediaPromotion(article) {
+  const { data: existing, error: findError } = await supabase
+    .from("media_promotions")
+    .select("*")
+    .eq("article_id", article.id)
+    .maybeSingle();
+  if (findError) throw findError;
+  if (existing) return existing;
+  const { data, error } = await supabase
+    .from("media_promotions")
+    .insert({
+      article_id: article.id,
+      target_count: MEDIA_PROMOTION_TARGET,
+      successful_count: 0,
+      failed_count: 0,
+      status: "active"
+    })
+    .select("*")
+    .single();
+  if (error) throw error;
+  await supabase.from("media_automation_logs").insert({
+    action: "start_promotion",
+    status: "success",
+    article_id: article.id,
+    message: `Promotion started for article with target ${MEDIA_PROMOTION_TARGET}.`
+  });
+  return data;
+}
+
+async function getMediaPromotion(articleId) {
+  const { data, error } = await supabase.from("media_promotions").select("*").eq("article_id", articleId).maybeSingle();
+  if (error) throw error;
+  return data || null;
+}
+
+async function stopMediaPromotion(articleId, reason = "manual") {
+  const { data, error } = await supabase.from("media_promotions")
+    .update({ status: "stopped", stopped_at: new Date().toISOString(), stop_reason: reason, updated_at: new Date().toISOString() })
+    .eq("article_id", articleId)
+    .eq("status", "active")
+    .select("*").maybeSingle();
+  if (error) throw error;
+  await supabase.from("media_automation_logs").insert({ action: "stop_promotion", status: "success", article_id: articleId, message: `Promotion stopped: ${reason}` });
+  return data || null;
+}
+
+async function processMediaPromotions() {
+  const { data: jobs, error } = await supabase.from("media_promotions")
+    .select("id,article_id,target_count,successful_count,failed_count,status,media_articles(id,title,excerpt,slug)")
+    .eq("status", "active")
+    .order("created_at", { ascending: true })
+    .limit(10);
+  if (error) throw error;
+  if (!jobs?.length) return { jobs: 0, sent: 0, failed: 0, completed: 0 };
+
+  await loadContacts();
+  let sent = 0, failed = 0, completed = 0;
+  for (const job of jobs) {
+    const article = job.media_articles;
+    if (!article) continue;
+    if (Number(job.successful_count) >= Number(job.target_count)) {
+      await supabase.from("media_promotions").update({ status: "completed", completed_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq("id", job.id);
+      completed++;
+      continue;
+    }
+
+    const { data: recipientRows, error: recipientError } = await supabase.from("media_promotion_recipients")
+      .select("id,contact_id,status")
+      .eq("promotion_id", job.id);
+    if (recipientError) throw recipientError;
+    const sentContactIds = new Set((recipientRows || []).filter(r => r.status === "sent").map(r => String(r.contact_id)));
+    const existingByContact = new Map((recipientRows || []).map(r => [String(r.contact_id), r]));
+    const candidates = contacts.filter(c => !sentContactIds.has(String(c.id))).slice(0, MEDIA_PROMOTION_BATCH);
+    if (!candidates.length) continue;
+
+    const base = process.env.JABARI_MEDIA_BASE_URL || "https://jabarip.netlify.app";
+    const articleUrl = `${base}/article.html?slug=${encodeURIComponent(article.slug)}`;
+    const subject = `Jabari Media — ${article.title}`;
+    const body = ["Hello,", "", "We would like to share a new article from Jabari Media.", "", article.title, "", article.excerpt || "", "", "Read the full article:", articleUrl, "", "Best regards,", "Jabari Media"].join("\n");
+
+    for (const c of candidates) {
+      if (Number(job.successful_count) + sent >= Number(job.target_count)) break;
+      let row = existingByContact.get(String(c.id));
+      if (row) {
+        const { data: updated, error: updateError } = await supabase.from("media_promotion_recipients").update({
+          status: "sending", attempts: Number((row.attempts || 0) + 1), last_attempt_at: new Date().toISOString(), error_message: null, updated_at: new Date().toISOString()
+        }).eq("id", row.id).select("id").single();
+        if (updateError) throw updateError;
+        row = updated;
+      } else {
+        const { data: inserted, error: insertError } = await supabase.from("media_promotion_recipients").insert({
+          promotion_id: job.id, contact_id: c.id, status: "sending", attempts: 1, last_attempt_at: new Date().toISOString()
+        }).select("id").single();
+        if (insertError) {
+          if (insertError.code === "23505") continue;
+          throw insertError;
+        }
+        row = inserted;
+      }
+      try {
+        await sendEmail(c.email, subject, body);
+        await supabase.from("media_promotion_recipients").update({ status: "sent", sent_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq("id", row.id);
+        const nextCount = Number(job.successful_count) + 1;
+        job.successful_count = nextCount;
+        sent++;
+        await supabase.from("media_promotions").update({ successful_count: nextCount, updated_at: new Date().toISOString(), ...(nextCount >= Number(job.target_count) ? { status: "completed", completed_at: new Date().toISOString() } : {}) }).eq("id", job.id);
+        if (nextCount >= Number(job.target_count)) { completed++; break; }
+      } catch (e) {
+        failed++;
+        await supabase.from("media_promotion_recipients").update({ status: "failed", error_message: e?.message || "Unknown error", updated_at: new Date().toISOString() }).eq("id", row.id);
+        const nextFailed = Number(job.failed_count) + 1;
+        job.failed_count = nextFailed;
+        await supabase.from("media_promotions").update({ failed_count: nextFailed, updated_at: new Date().toISOString() }).eq("id", job.id);
+      }
+    }
+  }
+  return { jobs: jobs.length, sent, failed, completed };
+}
+
 async function runMediaAutomation(chatId, source = "manual") {
   if (mediaAutomationRunning) return { skipped: true, message: "A Jabari Media automation run is already in progress." };
   const auto = await getMediaAutopilot();
@@ -600,15 +723,8 @@ async function runMediaAutomation(chatId, source = "manual") {
     // Review mode is the deliberate exception: generate a draft but do not publish.
     if (auto.mode === "full_auto") {
       const published = await publishMediaArticle(result.article.id);
-      const articleUrl = await prepareMediaPromotion(published);
-      let promotion = { sent:0, failed:0, processed:0 };
-      try {
-        const out = await finishPromotion(chatId);
-        promotion = { sent:out.filter(x=>x.status==="sent").length, failed:out.filter(x=>x.status==="failed").length, processed:out.length };
-      } catch (e) {
-        console.error("Promotion failed:", e.message);
-      }
-      return { skipped:false, message:`Published and promoted: ${published.title}`, article:published, topic:result.topic, articleUrl, promotion };
+      const articleUrl = `${process.env.JABARI_MEDIA_BASE_URL || "https://jabarip.netlify.app"}/article.html?slug=${encodeURIComponent(published.slug)}`;
+      return { skipped:false, message:`Published and promotion started: ${published.title}`, article:published, topic:result.topic, articleUrl, promotion:{started:true,target:MEDIA_PROMOTION_TARGET} };
     }
 
     return { skipped:false, message:`Draft created: ${result.article.title}`, article:result.article, topic:result.topic };
@@ -1100,7 +1216,7 @@ Status: ${d.status}`,{inline_keyboard:[[btn("🚀 Publish","media_publish:"+id)]
 
 ${d.title}
 
-The article is now marked published in Jabari Media.`,{inline_keyboard:[[btn("📢 Promote","media_promote:"+id)],[btn("📝 Drafts","media_drafts")],[btn("🤖 Media","menu_media")]]});
+The article is now marked published in Jabari Media.`,{inline_keyboard:[[btn("📢 Promotion Status","media_promotion:"+id)],[btn("📝 Drafts","media_drafts")],[btn("🤖 Media","menu_media")]]});
     }
     if (data.startsWith("media_promote:")) {
       const id = Number(data.split(":")[1]);
@@ -1108,6 +1224,19 @@ The article is now marked published in Jabari Media.`,{inline_keyboard:[[btn("�
       if (error) throw error;
       await prepareMediaPromotion(d);
       return showPromoteMenu(chatId,messageId);
+    }
+    if (data.startsWith("media_promotion:")) {
+      const id = Number(data.split(":")[1]);
+      const { data: article, error } = await supabase.from("media_articles").select("id,title,slug,status").eq("id", id).single();
+      if (error) throw error;
+      const job = await getMediaPromotion(id);
+      if (!job) return safeEdit(chatId,messageId,"📢 No promotion exists for this article.",{inline_keyboard:[[btn("🤖 Media","menu_media")]]});
+      return safeEdit(chatId,messageId,`📢 Promotion\n\n${article.title}\n\nStatus: ${job.status}\nReached: ${job.successful_count}/${job.target_count}\nFailed: ${job.failed_count}`,{inline_keyboard:[...(job.status==="active"?[[btn("🛑 Stop Promotion",`media_promotion_stop:${id}`)]]:[]),[btn("🤖 Media","menu_media")]]});
+    }
+    if (data.startsWith("media_promotion_stop:")) {
+      const id = Number(data.split(":")[1]);
+      await stopMediaPromotion(id, "manual");
+      return safeEdit(chatId,messageId,"🛑 Promotion stopped manually.",{inline_keyboard:[[btn("📢 Promotion Status",`media_promotion:${id}`)],[btn("🤖 Media","menu_media")]]});
     }
     if (data === "media_add_topic") {
       inputState = { chatId, type:"media_topic", step:"topic" };
@@ -1333,19 +1462,19 @@ async function handleAutomationWorker(req, res) {
     return res.end(JSON.stringify({ ok:false, error:"Forbidden" }));
   }
   try {
+    const promotion = await processMediaPromotions();
     const autoBefore = await getMediaAutopilot();
-    if (!autoBefore.enabled || autoBefore.publishing_frequency === "manual") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      return res.end(JSON.stringify({ ok:true, skipped:true, message:"Autopilot is disabled or manual." }));
-    }
-    const result = await runMediaAutomation(null, "auto");
-    const auto = await getMediaAutopilot();
-    if (result.article && auto.enabled && auto.publishing_frequency !== "manual") {
-      const hours = auto.publishing_frequency === "twice_daily" ? 12 : auto.publishing_frequency === "weekly" ? 168 : 24;
-      await setMediaAutopilot({ last_run_at:new Date().toISOString(), next_run_at:new Date(Date.now()+hours*3600000).toISOString() });
+    let result = { skipped:true, message:"Publishing is disabled or manual." };
+    if (autoBefore.enabled && autoBefore.publishing_frequency !== "manual") {
+      result = await runMediaAutomation(null, "auto");
+      const auto = await getMediaAutopilot();
+      if (result.article) {
+        const hours = auto.publishing_frequency === "twice_daily" ? 12 : auto.publishing_frequency === "weekly" ? 168 : 24;
+        await setMediaAutopilot({ last_run_at:new Date().toISOString(), next_run_at:new Date(Date.now()+hours*3600000).toISOString() });
+      }
     }
     res.writeHead(200, { "Content-Type": "application/json" });
-    return res.end(JSON.stringify({ ok:true, result: result.message, articleId: result.article?.id || null }));
+    return res.end(JSON.stringify({ ok:true, publishing: result.message, articleId: result.article?.id || null, promotion }));
   } catch (e) {
     console.error("Automation worker failed:", e.message);
     res.writeHead(500, { "Content-Type": "application/json" });
