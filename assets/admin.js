@@ -130,13 +130,20 @@
               <strong>${esc(article.title)}</strong>
               <small>${esc(article.media_categories?.name || "Uncategorised")} · ${esc(article.status)}</small>
             </div>
-            <button class="secondary editArticle" data-id="${article.id}">Edit</button>
+            <div class="articleActions">
+              <button class="secondary editArticle" data-id="${article.id}">Edit</button>
+              ${article.status === "draft" || article.status === "review" ? `<button class="danger deleteDraft" data-id="${article.id}">Delete</button>` : ""}
+            </div>
           </div>
         `).join("")
       : "<p class='muted'>No articles yet.</p>";
 
     document.querySelectorAll(".editArticle").forEach((button) => {
       button.onclick = () => editArticle(button.dataset.id);
+    });
+
+    document.querySelectorAll(".deleteDraft").forEach((button) => {
+      button.onclick = () => deleteDraft(button.dataset.id);
     });
   }
 
@@ -314,6 +321,46 @@
       console.error(error);
       showStatus(error?.message || String(error), true);
     }
+  }
+
+  async function deleteDraft(id) {
+    const article = await supabase
+      .from("media_articles")
+      .select("id,title,status")
+      .eq("id", id)
+      .maybeSingle();
+
+    if (article.error) {
+      showStatus(article.error.message, true);
+      return;
+    }
+
+    if (!article.data) {
+      showStatus("Draft not found.", true);
+      return;
+    }
+
+    if (article.data.status !== "draft" && article.data.status !== "review") {
+      showStatus("Only drafts can be deleted here.", true);
+      return;
+    }
+
+    if (!confirm(`Delete this draft?\n\n${article.data.title}`)) return;
+
+    const { error } = await supabase
+      .from("media_articles")
+      .delete()
+      .eq("id", id)
+      .in("status", ["draft", "review"]);
+
+    if (error) {
+      showStatus(error.message, true);
+      return;
+    }
+
+    if ($("articleId").value === String(id)) resetArticle();
+    showStatus("Draft deleted.");
+    await loadArticles();
   }
 
   async function handleTopicSubmit(event) {
