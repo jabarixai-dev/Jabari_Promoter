@@ -28,6 +28,8 @@ const googleClientId = process.env.GOOGLE_CLIENT_ID || "";
 const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET || "";
 const googleRefreshToken = process.env.GOOGLE_REFRESH_TOKEN || "";
 const googleRedirectUri = process.env.GOOGLE_REDIRECT_URI || `${BASE_URL}/oauth2callback`;
+const geminiApiKey = process.env.GEMINI_API_KEY || "";
+const geminiModel = process.env.GEMINI_MODEL || "gemini-3.8-flash";
 
 const PROMOTION_LIMIT = 10;
 let contacts = [];
@@ -313,6 +315,135 @@ async function addScannedEmails(emails) {
   return added;
 }
 
+
+function slugify(value) {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^a-z0-9\s-]/g, "")
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .slice(0, 90) || `article-${Date.now()}`;
+}
+
+async function getNextMediaTopic() {
+  const { data, error } = await supabase
+    .from("media_topics")
+    .select("id, topic, category_id, priority, status, created_at")
+    .eq("status", "queued")
+    .order("priority", { ascending: false })
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return data || null;
+}
+
+async function generateArticleFromTopic(topicRow) {
+  if (!geminiApiKey) throw new Error("GEMINI_API_KEY is not configured on Render.");
+  if (!topicRow?.topic) throw new Error("No queued topic was provided.");
+
+  const prompt = `You are the editorial writer for Jabari Media, an independent digital publication covering News, AI, Promotion, Crypto and Money.\n\nWrite a high-quality article based on this topic:\n\n${topicRow.topic}\n\nThis is a FIRST DRAFT only. Do not claim that you verified current facts or cite sources you did not actually receive. Do not invent statistics, quotes, names, dates, studies, product capabilities, or breaking-news details. If the topic depends on current facts, phrase uncertain points cautiously so a human editor can verify them before publication.\n\nReturn clean JSON only. The article body must be HTML suitable for inserting directly into a web article. Use <p>, <h2>, <h3>, <ul>, <li>, <strong>, and <em> where useful. Do not include a full HTML document.\n\nCreate:\n- title: strong editorial headline\n- excerpt: 1-2 sentence summary\n- content: substantial readable article body with a clear introduction and useful sections\n- seo_title: concise SEO title\n- meta_description: concise search description\n- tags: 3-6 short relevant tags`;
+
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(geminiModel)}:generateContent`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-goog-api-key": geminiApiKey
+    },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0.7,
+        maxOutputTokens: 5000,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: "OBJECT",
+          properties: {
+            title: { type: "STRING" },
+            excerpt: { type: "STRING" },
+            content: { type: "STRING" },
+            seo_title: { type: "STRING" },
+            meta_description: { type: "STRING" },
+            tags: { type: "ARRAY", items: { type: "STRING" } }
+          },
+          required: ["title", "excerpt", "content", "seo_title", "meta_description", "tags"]
+        }
+      }
+    })
+  });
+
+  const responseJson = await response.json();
+  if (!response.ok) {
+    const apiMessage = responseJson?.error?.message || `Gemini API returned HTTP ${response.status}.`;
+    throw new Error(apiMessage);
+  }
+
+  const raw = responseJson?.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("").trim();
+  if (!raw) throw new Error("Gemini returned an empty response.");
+
+  let article;
+  try { article = JSON.parse(raw); }
+  catch { throw new Error("Gemini returned invalid JSON."); }
+
+  const category = topicRow.category_id
+    ? (await supabase.from("media_categories").select("id, name").eq("id", topicRow.category_id).maybeSingle()).data
+    : null;
+
+  let slug = slugify(article.title);
+  const { data: existing } = await supabase.from("media_articles").select("id").eq("slug", slug).maybeSingle();
+  if (existing) slug = `${slug}-${Date.now()}`;
+
+  const { data: author } = await supabase.from("media_authors").select("id").eq("slug", "jabari").maybeSingle();
+
+  const { data: saved, error: saveError } = await supabase
+    .from("media_articles")
+    .insert({
+      title: article.title,
+      slug,
+      excerpt: article.excerpt,
+      content: article.content,
+      category_id: category?.id || null,
+      author_id: author?.id || null,
+      status: "draft",
+      article_type: "article",
+      seo_title: article.seo_title,
+      meta_description: article.meta_description
+    })
+    .select("*")
+    .single();
+  if (saveError) throw saveError;
+
+  const { error: topicError } = await supabase
+    .from("media_topics")
+    .update({ status: "published", used_at: new Date().toISOString() })
+    .eq("id", topicRow.id);
+  if (topicError) console.error("Could not mark topic as used:", topicError.message);
+
+  await supabase.from("media_automation_logs").insert({
+    action: "generate_article",
+    status: "success",
+    article_id: saved.id,
+    topic_id: topicRow.id,
+    message: `Generated draft: ${saved.title}`
+  });
+
+  return { article: saved, tags: Array.isArray(article.tags) ? article.tags : [] };
+}
+
+async function showAiWriterMenu(chatId, messageId) {
+  const topic = await getNextMediaTopic();
+  const text = topic
+    ? `🤖 Jabari AI Writer\n\nNext topic:\n${topic.topic}\n\nGemini will generate a draft and save it to Jabari Media.\n\nThe article will NOT be published automatically.`
+    : "🤖 Jabari AI Writer\n\nNo queued topics are waiting. Add a topic in the Jabari Media Admin dashboard first.";
+  const rows = topic
+    ? [[btn("✨ Generate Draft", "ai_generate")], [btn("⬅️ Back", "menu_main")]]
+    : [[btn("⬅️ Back", "menu_main")]];
+  if (messageId) return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
+  return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: rows } });
+}
+
 async function getCampaigns() {
   const { data, error } = await supabase
     .from("promoter_campaigns")
@@ -391,7 +522,8 @@ function mainMenu() {
   return menu([
     [btn("📝 Campaigns", "menu_campaigns"), btn("👥 Contacts", "menu_contacts")],
     [btn("📧 Promote", "menu_promote"), btn("📊 Status", "menu_status")],
-    [btn("🕵️ Email Scanner", "menu_scanner"), btn("🧪 Test Email", "menu_testemail")]
+    [btn("🕵️ Email Scanner", "menu_scanner"), btn("🤖 AI Writer", "menu_ai_writer")],
+    [btn("🧪 Test Email", "menu_testemail")]
   ]);
 }
 
@@ -661,6 +793,7 @@ bot.onText(/^\/blog$/, async msg => {
 bot.onText(/^\/campaign$/, async msg => { if (isOwner(msg)) await showCampaignMenu(msg.chat.id); else await deny(msg.chat.id); });
 bot.onText(/^\/contacts$/, async msg => { if (isOwner(msg)) await showContactsMenu(msg.chat.id); else await deny(msg.chat.id); });
 bot.onText(/^\/promote$/, async msg => { if (isOwner(msg)) await showPromoteMenu(msg.chat.id); else await deny(msg.chat.id); });
+bot.onText(/^\/generate$/, async msg => { if (isOwner(msg)) await showAiWriterMenu(msg.chat.id); else await deny(msg.chat.id); });
 bot.onText(/^\/cancelcampaign$/, async msg => { if (!isOwner(msg)) return deny(msg.chat.id); inputState = null; await bot.sendMessage(msg.chat.id, "Campaign input cancelled."); await showMain(msg.chat.id); });
 bot.onText(/^\/deletecampaign$/, async msg => { if (!isOwner(msg)) return deny(msg.chat.id); await showCampaignList(msg.chat.id); });
 bot.onText(/^\/test$/, async msg => { if (isOwner(msg)) await bot.sendMessage(msg.chat.id, `Jabari Promoter test successful.\n\nTelegram: OK\nSupabase: configured\nGmail: ${googleRefreshToken ? "configured" : "not configured"}\nMode: ${mode}`); else await deny(msg.chat.id); });
@@ -760,6 +893,21 @@ bot.on("callback_query", async q => {
     if (data === "menu_status") return showStatus(chatId, messageId);
     if (data === "menu_promote") return showPromoteMenu(chatId, messageId);
     if (data === "menu_scanner") return showScannerMenu(chatId, messageId);
+    if (data === "menu_ai_writer") return showAiWriterMenu(chatId, messageId);
+    if (data === "ai_generate") {
+      const topic = await getNextMediaTopic();
+      if (!topic) return showAiWriterMenu(chatId, messageId);
+      await safeEdit(chatId, messageId, `🤖 Generating draft…\n\nTopic:\n${topic.topic}\n\nPlease wait.`, { inline_keyboard: [] });
+      try {
+        const result = await generateArticleFromTopic(topic);
+        const a = result.article;
+        return safeEdit(chatId, messageId, `✅ Draft created\n\n${a.title}\n\nStatus: Draft\nCategory: ${topic.category_id ? "Assigned" : "Unassigned"}\n\nOpen the Jabari Media Admin dashboard to review and publish it.`, { inline_keyboard: [[btn("🤖 AI Writer", "menu_ai_writer")], [btn("🏠 Main Menu", "menu_main")]] });
+      } catch (e) {
+        console.error("AI generation error:", e.message);
+        try { await supabase.from("media_automation_logs").insert({ action: "generate_article", status: "failed", topic_id: topic.id, message: e.message }); } catch (_) {}
+        return safeEdit(chatId, messageId, `❌ Draft generation failed.\n\n${e.message}`, { inline_keyboard: [[btn("🔄 Try Again", "ai_generate")], [btn("⬅️ Back", "menu_main")]] });
+      }
+    }
 
     if (data === "scanner_website") {
       inputState = { chatId, type: "scan_website", step: "url" };
