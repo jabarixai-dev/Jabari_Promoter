@@ -340,6 +340,46 @@ async function getNextMediaTopic() {
   return data || null;
 }
 
+async function getMediaCategories() {
+  const { data, error } = await supabase
+    .from("media_categories")
+    .select("id, name, slug")
+    .order("name", { ascending: true });
+  if (error) throw error;
+  return data || [];
+}
+
+async function addMediaTopic(topic, categoryId = null, priority = 0) {
+  const cleanTopic = String(topic || "").trim();
+  if (!cleanTopic) throw new Error("Topic cannot be empty.");
+  if (cleanTopic.length > 300) throw new Error("Topic is too long. Keep it under 300 characters.");
+  const { data, error } = await supabase
+    .from("media_topics")
+    .insert({ topic: cleanTopic, category_id: categoryId || null, priority: Number(priority) || 0, status: "queued" })
+    .select("*")
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+async function showTopicCategoryPicker(chatId, messageId) {
+  const categories = await getMediaCategories();
+  const rows = categories.map(c => [btn(c.name, `topic_category:${c.id}`)]);
+  rows.push([btn("⚪ No Category", "topic_category:none")]);
+  rows.push([btn("❌ Cancel", "topic_cancel")]);
+  const text = `💡 Add Topic\n\nTopic:\n${inputState?.topic || ""}\n\nChoose a category for this topic:`;
+  if (messageId) return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
+  return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: rows } });
+}
+
+async function startTopicInput(chatId, messageId) {
+  inputState = { chatId, type: "topic_add", step: "topic", topic: "" };
+  const text = "💡 Add Topic\n\nSend the topic you want Jabari Media to research and turn into an article.\n\nExample:\nAI agents are becoming digital coworkers — what happens when they start doing the work themselves?";
+  const kb = { inline_keyboard: [[btn("❌ Cancel", "topic_cancel")]] };
+  if (messageId) await safeEdit(chatId, messageId, text, kb);
+  return bot.sendMessage(chatId, "✍️ Enter your topic:", { reply_markup: { force_reply: true } });
+}
+
 
 function decodeXml(value) {
   return String(value || "")
@@ -674,11 +714,11 @@ Create:
 async function showAiWriterMenu(chatId, messageId) {
   const topic = await getNextMediaTopic();
   const text = topic
-    ? `🤖 Jabari AI Writer\n\nNext topic:\n${topic.topic}\n\nGemini will generate a draft and save it to Jabari Media.\n\nThe article will NOT be published automatically.`
-    : "🤖 Jabari AI Writer\n\nNo queued topics are waiting. Add a topic in the Jabari Media Admin dashboard first.";
+    ? `🤖 Jabari AI Writer\n\nNext topic:\n${topic.topic}\n\nGemini will research the topic and generate a draft for Jabari Media.\n\nThe article will NOT be published automatically.`
+    : "🤖 Jabari AI Writer\n\nNo queued topics are waiting. Add a topic here and Jabari can research it and generate the draft.";
   const rows = topic
-    ? [[btn("✨ Generate Draft", "ai_generate")], [btn("⬅️ Back", "menu_main")]]
-    : [[btn("⬅️ Back", "menu_main")]];
+    ? [[btn("✨ Generate Draft", "ai_generate")], [btn("➕ Add Another Topic", "topic_add")], [btn("⬅️ Back", "menu_main")]]
+    : [[btn("➕ Add Topic", "topic_add")], [btn("⬅️ Back", "menu_main")]];
   if (messageId) return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
   return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: rows } });
 }
@@ -1033,6 +1073,17 @@ bot.onText(/^\/campaign$/, async msg => { if (isOwner(msg)) await showCampaignMe
 bot.onText(/^\/contacts$/, async msg => { if (isOwner(msg)) await showContactsMenu(msg.chat.id); else await deny(msg.chat.id); });
 bot.onText(/^\/promote$/, async msg => { if (isOwner(msg)) await showPromoteMenu(msg.chat.id); else await deny(msg.chat.id); });
 bot.onText(/^\/generate$/, async msg => { if (isOwner(msg)) await showAiWriterMenu(msg.chat.id); else await deny(msg.chat.id); });
+bot.onText(/^\/topic(?:\s+(.+))?$/i, async (msg, match) => {
+  if (!isOwner(msg)) return deny(msg.chat.id);
+  const topic = match?.[1]?.trim();
+  if (!topic) return startTopicInput(msg.chat.id);
+  try {
+    const saved = await addMediaTopic(topic);
+    await bot.sendMessage(msg.chat.id, `✅ Topic added to the queue.\n\n${saved.topic}\n\nCategory: Unassigned`, { reply_markup: { inline_keyboard: [[btn("🤖 AI Writer", "menu_ai_writer")], [btn("🏠 Main Menu", "menu_main")]] } });
+  } catch (e) {
+    await bot.sendMessage(msg.chat.id, `❌ Could not add topic.\n\n${e.message}`);
+  }
+});
 bot.onText(/^\/cancelcampaign$/, async msg => { if (!isOwner(msg)) return deny(msg.chat.id); inputState = null; await bot.sendMessage(msg.chat.id, "Campaign input cancelled."); await showMain(msg.chat.id); });
 bot.onText(/^\/deletecampaign$/, async msg => { if (!isOwner(msg)) return deny(msg.chat.id); await showCampaignList(msg.chat.id); });
 bot.onText(/^\/test$/, async msg => { if (isOwner(msg)) await bot.sendMessage(msg.chat.id, `Jabari Promoter test successful.\n\nTelegram: OK\nSupabase: configured\nGmail: ${googleRefreshToken ? "configured" : "not configured"}\nMode: ${mode}`); else await deny(msg.chat.id); });
@@ -1049,6 +1100,15 @@ bot.on("message", async msg => {
   if (!isOwner(msg) || !msg.text || msg.text.startsWith("/") || !inputState || inputState.chatId !== msg.chat.id) return;
   const s = inputState;
   try {
+    if (s.type === "topic_add") {
+      const topic = msg.text.trim();
+      if (!topic) return bot.sendMessage(msg.chat.id, "Please enter a topic.");
+      if (topic.length > 300) return bot.sendMessage(msg.chat.id, "Please keep the topic under 300 characters.");
+      inputState.topic = topic;
+      inputState.step = "category";
+      return showTopicCategoryPicker(msg.chat.id);
+    }
+
     if (s.type === "scan_website") {
       const url = msg.text.trim();
       if (!(await validateUrl(url))) return bot.sendMessage(msg.chat.id, "Please send a valid URL beginning with https://");
@@ -1133,6 +1193,28 @@ bot.on("callback_query", async q => {
     if (data === "menu_promote") return showPromoteMenu(chatId, messageId);
     if (data === "menu_scanner") return showScannerMenu(chatId, messageId);
     if (data === "menu_ai_writer") return showAiWriterMenu(chatId, messageId);
+    if (data === "topic_add") return startTopicInput(chatId, messageId);
+    if (data === "topic_cancel") {
+      inputState = null;
+      return showAiWriterMenu(chatId, messageId);
+    }
+    if (data.startsWith("topic_category:")) {
+      if (!inputState || inputState.chatId !== chatId || inputState.type !== "topic_add" || inputState.step !== "category") {
+        return showAiWriterMenu(chatId, messageId);
+      }
+      const rawCategory = data.slice("topic_category:".length);
+      const categoryId = rawCategory === "none" ? null : Number(rawCategory);
+      if (rawCategory !== "none" && !Number.isInteger(categoryId)) throw new Error("Invalid category.");
+      const topicText = inputState.topic;
+      const saved = await addMediaTopic(topicText, categoryId);
+      inputState = null;
+      let categoryName = "Unassigned";
+      if (categoryId) {
+        const categories = await getMediaCategories();
+        categoryName = categories.find(c => Number(c.id) === categoryId)?.name || "Assigned";
+      }
+      return safeEdit(chatId, messageId, `✅ Topic added to the queue.\n\n${saved.topic}\n\nCategory: ${categoryName}\n\nYou can generate it now or add more topics.`, { inline_keyboard: [[btn("✨ Generate Draft", "ai_generate")], [btn("➕ Add Another Topic", "topic_add")], [btn("🏠 Main Menu", "menu_main")]] });
+    }
     if (data === "ai_generate") {
       const topic = await getNextMediaTopic();
       if (!topic) return showAiWriterMenu(chatId, messageId);
