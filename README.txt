@@ -1,45 +1,38 @@
-JABARI TELEGRAM MEDIA CONTROL v1
+Jabari Autopilot v2 — Telegram Control + Persistent Scheduler
 
-This version makes Telegram the primary control center for Jabari Media.
+WHAT THIS VERSION DOES
+- Keeps Telegram as the main control center.
+- Adds a persistent private worker secret in Supabase.
+- Adds POST /automation-worker to the Render bot.
+- Adds a Supabase Cron job that wakes the Render worker every minute.
+- The worker checks the saved Autopilot state before doing anything.
+- Manual Run Now executes the complete current pipeline when Mode is Full Auto.
+- Review mode generates a draft but does not publish it.
+- Full Auto publishes and promotes after generation.
+- Manual frequency disables scheduled execution.
+- Removes the old in-process setInterval scheduler to avoid duplicate runs.
 
-FEATURES
-- 🤖 Jabari Media menu in Telegram
-- Add topics from Telegram
-- View topics
-- Generate next article manually
-- Generate a selected topic manually
-- Research topic before generation using public Google News RSS results
-- Save researched article as a draft in media_articles
-- View drafts from Telegram
-- Publish drafts from Telegram
-- Delete drafts from Telegram
-- Prepare a published article for promotion from Telegram
-- Autopilot ON/OFF stored in Supabase media_autopilot
-- Manual Run Now button
-- Review/full_auto mode toggle
-- Manual/daily/twice_daily/weekly frequency toggle
-- Persistent automation state in Supabase
-- Automatic worker checks the persisted state every minute
-- Full Auto: research -> generate -> publish -> prepare promotion -> promote
+DEPLOY
+1. Replace your current bot.js in GitHub with this bot.js.
+2. Add the SQL migration file under supabase/migrations/.
+3. Commit and push both files.
+4. Let Render redeploy the bot.
+5. Let your existing Supabase GitHub migration workflow deploy the SQL migration.
 
 IMPORTANT
-1. Replace your existing bot.js with this file.
-2. Do NOT remove or change existing Render environment variables.
-3. GEMINI_API_KEY is read from Render environment variables. It is not stored in this file.
-4. No new npm package is required; the code uses Node's built-in fetch.
-5. Keep the existing package.json because the bot still needs googleapis and the other existing dependencies.
-6. After Render deploys, open Telegram and press /start.
-7. Choose 🤖 Jabari Media.
+- Do NOT change or paste any existing secrets.
+- The worker secret is generated automatically by the bot on startup and stored in media_worker_config.
+- The SQL migration contains no secret.
+- The cron job runs every minute, but it does not mean an article is generated every minute. It only wakes the worker; the saved Autopilot frequency controls when a run is actually allowed.
 
-AUTOPILOT SAFETY
-- Default database mode remains review unless you change it.
-- Turning ON does not publish immediately unless mode is full_auto and a queued topic is available.
-- Run Now always performs one manual article-generation cycle.
-- Full Auto publishes and promotes only after successful generation.
-- Turning OFF persists immediately in media_autopilot.enabled.
+FIRST TEST
+1. Telegram → Jabari Media → Autopilot.
+2. Set Mode to Full Auto.
+3. Set Frequency to Manual first.
+4. Press Run Now. It should research → generate → publish → prepare promotion → promote using the existing contacts.
+5. Then set Frequency to Daily.
+6. Turn Autopilot ON.
+7. The next_run_at value will be set and the scheduler will invoke the worker every minute until the scheduled time arrives.
 
-AUTOMATIC SCHEDULING NOTE
-The Render worker checks every minute while the Render service is running. Render free-tier services can sleep when idle, so truly continuous 24/7 automation may later need an external scheduler or a non-sleeping worker. The Telegram controls and persisted ON/OFF state are already in place.
-
-NO DASHBOARD REQUIRED FOR NORMAL OPERATION
-The Jabari Media dashboard can remain available for deep editing, but normal topic entry, generation, publishing, promotion, and Autopilot control can now be done from Telegram.
+CURRENT LIMITATION
+The current automatic pipeline uses the contacts already in the Promoter contacts list. The existing website scanner is still a manual discovery tool. A separate autonomous public-web contact discovery engine should be added before claiming that the system can discover new contacts automatically for every article.

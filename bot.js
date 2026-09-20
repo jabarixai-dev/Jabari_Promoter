@@ -41,7 +41,7 @@ let scanPages = [];
 let scanSelected = new Set();
 let scanRunning = false;
 let mediaAutomationRunning = false;
-let mediaAutomationTimer = null;
+let mediaWorkerSecret = "";
 
 function isOwner(update) {
   return !!ownerId && String(update?.from?.id) === ownerId;
@@ -389,6 +389,21 @@ function campaignPreview(c) {
 
 
 // ----- Jabari Media / Autopilot -----
+async function ensureMediaWorkerSecret() {
+  const { data, error } = await supabase.from("media_worker_config").select("worker_secret").eq("id", 1).maybeSingle();
+  if (error) throw error;
+  if (data?.worker_secret) { mediaWorkerSecret = data.worker_secret; return mediaWorkerSecret; }
+  const secret = crypto.randomBytes(48).toString("hex");
+  const { data: saved, error: saveError } = await supabase
+    .from("media_worker_config")
+    .upsert({ id: 1, worker_secret: secret, updated_at: new Date().toISOString() })
+    .select("worker_secret")
+    .single();
+  if (saveError) throw saveError;
+  mediaWorkerSecret = saved.worker_secret;
+  return mediaWorkerSecret;
+}
+
 async function getMediaAutopilot() {
   const { data, error } = await supabase.from("media_autopilot").select("*").eq("id", 1).single();
   if (error) throw error;
@@ -534,7 +549,10 @@ async function runMediaAutomation(chatId, source = "manual") {
   try {
     const result = await createMediaDraftFromTopic();
     if (!result.topic) return { skipped:false, message:"No queued topic is waiting." };
-    if (source === "auto" && auto.mode === "full_auto") {
+
+    // A manual Run Now means: execute the complete current pipeline.
+    // Review mode is the deliberate exception: generate a draft but do not publish.
+    if (auto.mode === "full_auto") {
       const published = await publishMediaArticle(result.article.id);
       const articleUrl = await prepareMediaPromotion(published);
       let promotion = { sent:0, failed:0, processed:0 };
@@ -542,32 +560,13 @@ async function runMediaAutomation(chatId, source = "manual") {
         const out = await finishPromotion(chatId);
         promotion = { sent:out.filter(x=>x.status==="sent").length, failed:out.filter(x=>x.status==="failed").length, processed:out.length };
       } catch (e) {
-        console.error("Automatic promotion failed:", e.message);
+        console.error("Promotion failed:", e.message);
       }
       return { skipped:false, message:`Published and promoted: ${published.title}`, article:published, topic:result.topic, articleUrl, promotion };
     }
+
     return { skipped:false, message:`Draft created: ${result.article.title}`, article:result.article, topic:result.topic };
   } finally { mediaAutomationRunning = false; }
-}
-
-async function mediaAutomationTick() {
-  try {
-    const auto = await getMediaAutopilot();
-    if (!auto.enabled || auto.mode !== "full_auto" || auto.publishing_frequency === "manual") return;
-    const now = Date.now();
-    if (auto.next_run_at && new Date(auto.next_run_at).getTime() > now) return;
-    const result = await runMediaAutomation(null, "auto");
-    if (result.article) {
-      const next = new Date(Date.now() + (auto.publishing_frequency === "twice_daily" ? 12 : auto.publishing_frequency === "weekly" ? 168 : 24) * 3600000).toISOString();
-      await setMediaAutopilot({ last_run_at:new Date().toISOString(), next_run_at:next });
-    }
-  } catch (e) { console.error("Media automation tick failed:", e.message); }
-}
-
-function startMediaAutomationWorker() {
-  if (mediaAutomationTimer) clearInterval(mediaAutomationTimer);
-  mediaAutomationTimer = setInterval(mediaAutomationTick, 60000);
-  void mediaAutomationTick();
 }
 
 async function showMediaMenu(chatId, messageId) {
@@ -1015,11 +1014,10 @@ bot.on("callback_query", async q => {
     if (data === "media_run_now") {
       await safeEdit(chatId,messageId,"▶️ Running Jabari Media now…\n\nResearching the next queued topic and generating a draft.");
       const r = await runMediaAutomation(chatId,"manual");
-      return bot.sendMessage(chatId, r.article ? `✅ ${r.message}
+      const detail = r.promotion ? `
 
-Status: Draft
-
-Review and publish it from Telegram.` : `ℹ️ ${r.message}`, {reply_markup:{inline_keyboard:[[btn("📝 Drafts","media_drafts")],[btn("🤖 Media","menu_media")]]}});
+📧 Promotion: ${r.promotion.sent} sent, ${r.promotion.failed} failed` : "";
+      return bot.sendMessage(chatId, r.article ? `✅ ${r.message}${detail}` : `ℹ️ ${r.message}`, {reply_markup:{inline_keyboard:[[btn("📝 Drafts","media_drafts")],[btn("🤖 Media","menu_media")]]}});
     }
     if (data === "media_generate") {
       await safeEdit(chatId,messageId,"✍️ Generating the next article…\n\nJabari will research the topic first.");
@@ -1278,6 +1276,33 @@ async function handleOAuthCallback(req, res) {
   }
 }
 
+async function handleAutomationWorker(req, res) {
+  const provided = req.headers["x-jabari-worker-secret"] || "";
+  if (!mediaWorkerSecret || provided !== mediaWorkerSecret) {
+    res.writeHead(403, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({ ok:false, error:"Forbidden" }));
+  }
+  try {
+    const autoBefore = await getMediaAutopilot();
+    if (!autoBefore.enabled || autoBefore.publishing_frequency === "manual") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ ok:true, skipped:true, message:"Autopilot is disabled or manual." }));
+    }
+    const result = await runMediaAutomation(null, "auto");
+    const auto = await getMediaAutopilot();
+    if (result.article && auto.enabled && auto.publishing_frequency !== "manual") {
+      const hours = auto.publishing_frequency === "twice_daily" ? 12 : auto.publishing_frequency === "weekly" ? 168 : 24;
+      await setMediaAutopilot({ last_run_at:new Date().toISOString(), next_run_at:new Date(Date.now()+hours*3600000).toISOString() });
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({ ok:true, result: result.message, articleId: result.article?.id || null }));
+  } catch (e) {
+    console.error("Automation worker failed:", e.message);
+    res.writeHead(500, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({ ok:false, error:e.message }));
+  }
+}
+
 async function handleTelegramUpdate(req, res) {
   if (req.headers["x-telegram-bot-api-secret-token"] !== webhookSecret) {
     res.writeHead(403); return res.end("Forbidden");
@@ -1291,6 +1316,7 @@ async function handleTelegramUpdate(req, res) {
 }
 
 const server = http.createServer((req, res) => {
+  if (req.method === "POST" && req.url === "/automation-worker") return handleAutomationWorker(req, res);
   if (req.method === "POST" && req.url === webhookPath) return handleTelegramUpdate(req, res);
   if (req.method === "GET" && req.url === "/") { res.writeHead(200, { "Content-Type": "text/plain" }); return res.end("Jabari Promoter is running."); }
   if (req.method === "GET" && req.url.startsWith("/oauth2callback")) return handleOAuthCallback(req, res);
@@ -1313,12 +1339,13 @@ server.listen(PORT, async () => {
     else console.log(`Supabase connected successfully. Loaded ${contacts.length} contacts.`);
     const active = await getActiveCampaign();
     console.log(`Active campaign: ${active?.title || "None"}`);
+    await ensureMediaWorkerSecret();
+    console.log("Media automation worker secret ready.");
   } catch (e) {
     console.error("Startup data initialization failed:", e.message);
   }
 });
 
-startMediaAutomationWorker();
 
 process.on("unhandledRejection", e => console.error("Unhandled rejection:", e));
 process.on("uncaughtException", e => console.error("Uncaught exception:", e));
