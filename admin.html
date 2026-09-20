@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Jabari Media Admin</title>
+<link rel="stylesheet" href="assets/admin.css">
+</head>
+<body>
+<header class="topbar"><a class="brand" href="index.html">Jabari</a><span class="badge">Media Admin</span></header>
+<main class="wrap">
+<section id="loginPanel" class="panel">
+<div class="eyebrow">JABARI MEDIA</div><h1>Admin sign in</h1>
+<p class="muted">Sign in with an authorized Jabari Media account.</p>
+<form id="loginForm">
+<label>Email<input id="email" type="email" autocomplete="email" required></label>
+<label>Password<input id="password" type="password" autocomplete="current-password" required></label>
+<button class="primary" type="submit">Sign in</button>
+</form><p id="loginMsg" class="msg"></p>
+</section>
+
+<section id="adminPanel" hidden>
+<div class="adminHead"><div><div class="eyebrow">CONTROL CENTER</div><h1>Jabari Media</h1><p class="muted">Create, edit and publish stories. Autopilot stays off until you turn it on.</p></div><button id="logoutBtn" class="secondary">Sign out</button></div>
+<div id="statusMsg" class="msg"></div>
+
+<section class="stats">
+<div class="stat"><strong id="publishedCount">0</strong><span>Published</span></div>
+<div class="stat"><strong id="draftCount">0</strong><span>Drafts</span></div>
+<div class="stat"><strong id="topicCount">0</strong><span>Queued topics</span></div>
+<div class="stat"><strong id="autoState">OFF</strong><span>Autopilot</span></div>
+</section>
+
+<section class="grid2">
+<div class="panel">
+<div class="sectionHead"><div><h2>Article editor</h2><p class="muted">Write a story and save it as draft or publish it.</p></div></div>
+<form id="articleForm">
+<input id="articleId" type="hidden">
+<label>Title<input id="articleTitle" required></label>
+<label>Slug<input id="articleSlug" placeholder="auto-generated if empty"></label>
+<label>Excerpt<textarea id="articleExcerpt" rows="3"></textarea></label>
+<label>Category<select id="articleCategory"></select></label>
+<label>Article type<select id="articleType"><option value="article">Article</option><option value="news">News</option><option value="analysis">Analysis</option><option value="guide">Guide</option><option value="opinion">Opinion</option></select></label>
+<label>Featured image URL<input id="articleImage" type="url" placeholder="https://..."></label>
+<label>Content<textarea id="articleContent" rows="14" placeholder="Write the article here..."></textarea></label>
+<label>SEO title<input id="seoTitle"></label>
+<label>Meta description<textarea id="metaDescription" rows="3"></textarea></label>
+<div class="actions"><button class="secondary" type="button" id="newArticleBtn">New</button><button class="secondary" type="submit" data-status="draft">Save draft</button><button class="primary" type="submit" data-status="published">Publish</button></div>
+</form>
+</div>
+
+<div class="panel">
+<div class="sectionHead"><div><h2>Topics</h2><p class="muted">Give Jabari ideas for future articles.</p></div></div>
+<form id="topicForm" class="inlineForm"><input id="topicInput" placeholder="e.g. AI agents in education" required><select id="topicCategory"></select><button class="primary" type="submit">Add topic</button></form>
+<div id="topics" class="list"></div>
+<hr>
+<div class="sectionHead"><div><h2>Autopilot</h2><p class="muted">The master switch for future automation.</p></div></div>
+<div class="autoBox"><div><strong id="autoLabel">Autopilot is OFF</strong><span id="autoDescription">No automatic publishing will run.</span></div><button id="autoBtn" class="danger">Turn ON</button></div>
+<label>Mode<select id="autoMode"><option value="review">Review</option><option value="full_auto">Full auto</option></select></label>
+<label>Frequency<select id="autoFrequency"><option value="manual">Manual</option><option value="daily">Daily</option><option value="twice_daily">Twice daily</option><option value="weekly">Weekly</option></select></label>
+</div>
+</section>
+
+<section class="panel"><div class="sectionHead"><div><h2>Articles</h2><p class="muted">Newest first.</p></div></div><div id="articles" class="articleList"></div></section>
+</section>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="assets/config.js"></script>
+<script src="assets/admin.js"></script>
+</body>
+</html>
