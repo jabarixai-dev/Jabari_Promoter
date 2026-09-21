@@ -500,18 +500,21 @@ async function mediaResearch(topic) {
   return resolved;
 }
 
+function extractAllCitationIds(content) {
+  return [...new Set([...String(content || "").matchAll(/\[(\d+)\]/g)].map(m => Number(m[1])))];
+}
+
 function extractCitationIds(content, sourceCount) {
-  const ids = [...String(content || "").matchAll(/\[(\d+)\]/g)].map(m => Number(m[1]));
-  return [...new Set(ids)].filter(n => Number.isInteger(n) && n >= 1 && n <= sourceCount);
+  return extractAllCitationIds(content).filter(n => Number.isInteger(n) && n >= 1 && n <= sourceCount);
 }
 
 function extractInvalidCitationIds(content, sourceCount) {
-  return [...new Set([...String(content || "").matchAll(/\[(\d+)\]/g)].map(m => Number(m[1])).filter(n => !Number.isInteger(n) || n < 1 || n > sourceCount))];
+  return extractAllCitationIds(content).filter(n => !Number.isInteger(n) || n < 1 || n > sourceCount);
 }
 
 function stripGeneratedSourcesSection(content) {
   return String(content || "")
-    .replace(/<hr\s*\/?>\s*<h2[^>]*>\s*Sources\s*<\/h2>[\s\S]*$/i, "")
+    .replace(/<hr\s*\/?><h2[^>]*>\s*Sources\s*<\/h2>[\s\S]*$/i, "")
     .trim();
 }
 
@@ -542,6 +545,143 @@ function normalizeCitationsAndBuildSources(content, sources) {
   }).join("");
 
   return `${normalizedBody}\n\n<hr><h2>Sources</h2><ol>${sourceItems}</ol>`;
+}
+
+function htmlToText(html) {
+  return String(html || "")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<br\s*\/?>(?=.)/gi, "\n")
+    .replace(/<\/p>|<\/h[1-6]>|<\/li>|<\/blockquote>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&quot;/gi, '"').replace(/&#39;/gi, "'")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+    .replace(/\s+/g, " ").trim();
+}
+
+function primarySourceScore(source) {
+  const host = (() => { try { return new URL(source.url).hostname.toLowerCase(); } catch { return ""; } })();
+  const publisher = String(source.publisher || "").toLowerCase();
+  const title = String(source.title || "").toLowerCase();
+  let score = 0;
+  if (/\.(gov|gov\.ng|edu|ac\.uk|int)$/.test(host) || host.includes(".gov.")) score += 50;
+  if (/(official|press release|announcement|statement|report|filing|dataset|research)/.test(title)) score += 20;
+  if (/(government|official|regulator|central bank|university|research institute)/.test(publisher)) score += 15;
+  if (/(reuters|apnews|bbc|cnn|guardian|nytimes|techcrunch)/.test(host)) score += 5;
+  return score;
+}
+
+async function fetchSourceEvidence(url) {
+  let current;
+  try { current = await assertPublicUrl(url); } catch (e) { return { url, directUrl: url, text: "", error: e.message }; }
+  for (let i = 0; i <= 3; i++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
+    try {
+      const response = await fetch(current.href, { redirect: "manual", signal: controller.signal, headers: { "User-Agent": "JabariCitationGuard/1.0" } });
+      if ([301,302,303,307,308].includes(response.status)) {
+        const location = response.headers.get("location");
+        if (!location) return { url, directUrl: current.href, text: "", error: `Redirect ${response.status} had no destination.` };
+        current = await assertPublicUrl(new URL(location, current).href);
+        continue;
+      }
+      if (!response.ok) return { url, directUrl: current.href, text: "", error: `HTTP ${response.status}` };
+      const type = (response.headers.get("content-type") || "").toLowerCase();
+      if (!type.includes("text/html") && !type.includes("application/xhtml+xml")) return { url, directUrl: current.href, text: "", error: "Source is not an HTML page." };
+      const html = await response.text();
+      return { url, directUrl: current.href, text: htmlToText(html).slice(0, 14000), error: "" };
+    } catch (e) {
+      return { url, directUrl: current.href, text: "", error: e?.name === "AbortError" ? "Source timed out." : e.message };
+    } finally { clearTimeout(timer); }
+  }
+  return { url, directUrl: current.href, text: "", error: "Too many redirects." };
+}
+
+async function resolveAndRefreshSources(sources) {
+  const refreshed = [];
+  for (const source of sources || []) {
+    const direct = await resolveDirectSourceUrl(source.url);
+    const evidence = await fetchSourceEvidence(direct);
+    refreshed.push({ ...source, url: evidence.directUrl || direct, original_url: source.url, evidence: evidence.text, fetch_error: evidence.error });
+  }
+  return refreshed;
+}
+
+function buildClaimValidationPrompt(articleBody, sources) {
+  const sourceText = sources.map((s, i) => {
+    const evidence = s.evidence || "";
+    return `SOURCE ${i + 1}\nTitle: ${s.title}\nPublisher: ${s.publisher || "Unknown"}\nURL: ${s.url}\nEvidence:\n${evidence || "[SOURCE COULD NOT BE FETCHED]"}`;
+  }).join("\n\n");
+  return `You are Jabari Citation Guard. Validate an already-written journalistic article against the supplied source evidence. Be conservative: a claim is supported only when the cited source directly supports the factual substance of the claim. Do not infer missing facts. Do not treat a source title alone as proof. Current/factual claims must have citations. Opinions, clearly labeled analysis, and transitions do not need citations.\n\nARTICLE HTML:\n${articleBody}\n\n${sourceText}\n\nReturn JSON only with this exact structure:\n{"claims":[{"claim":"...","citation":1,"supported":true,"reason":"..."}],"uncited_factual_claims":["..."],"invalid_citations":[1],"source_quality":[{"source":1,"primary":true,"score":70,"reason":"..."}],"overall_valid":true,"summary":"..."}\n\nRules:\n- Report material factual/current claims, not every sentence.\n- citation must be the source number immediately associated with the claim; use null if no citation.\n- supported=true only if the cited source directly supports the claim.\n- invalid_citations contains citation numbers that cannot support the cited claim or do not exist.\n- source_quality should assess whether a source is primary/official where relevant.\n- overall_valid=false if any material factual/current claim is uncited, any citation is invalid/unsupported, or required evidence cannot be verified.\n- Prefer primary/official sources when they are available among the supplied sources, but do not fail an article merely because a secondary source is used when no primary source is reasonably available.`;
+}
+
+async function runGeminiJson(prompt, label = "Citation Guard") {
+  let lastError = null;
+  for (const model of geminiFallbackModels) {
+    for (const delay of [0, 3000]) {
+      if (delay) await new Promise(r => setTimeout(r, delay));
+      try {
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+          method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": geminiApiKey },
+          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 6000, responseMimeType: "application/json" } })
+        });
+        const data = await response.json();
+        if (!response.ok) { const e = new Error(data?.error?.message || `${label} Gemini HTTP ${response.status}`); e.status=response.status; throw e; }
+        const raw = data?.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("").trim();
+        if (!raw) throw new Error(`${label} returned an empty response.`);
+        return JSON.parse(raw);
+      } catch (e) {
+        lastError = e;
+        if (!isTransientGeminiError(e)) throw e;
+      }
+    }
+  }
+  throw lastError || new Error(`${label} failed.`);
+}
+
+async function validateArticleCitations({ article, sources }) {
+  const rawContent = String(article.content || "");
+  const body = stripGeneratedSourcesSection(rawContent);
+  const rawIds = extractAllCitationIds(body);
+  const sourcesHeadingPresent = /<h2[^>]*>\s*Sources\s*<\/h2>/i.test(rawContent);
+  const sourceListItems = (rawContent.match(/<li[\s>]/gi) || []).length;
+  const structuralErrors = [];
+  if (!sourcesHeadingPresent) structuralErrors.push("The article is missing its Sources section.");
+  if (rawIds.length && sourceListItems < new Set(rawIds).size) structuralErrors.push("The Sources section does not contain every cited source.");
+  const invalidNumbers = rawIds.filter(n => n < 1 || n > sources.length);
+  if (!rawIds.length) return { valid:false, status:"failed", errors:[...structuralErrors, "The article contains no citations."], warnings:[], claims_checked:0, citations_checked:0, source_count:sources.length, citation_map:[] };
+  if (invalidNumbers.length) return { valid:false, status:"failed", errors:[...structuralErrors, `Citation number(s) do not exist: ${[...new Set(invalidNumbers)].map(n=>`[${n}]`).join(", ")}.`], warnings:[], claims_checked:0, citations_checked:rawIds.length, source_count:sources.length, citation_map:[] };
+
+  const evidenceSources = await resolveAndRefreshSources(sources);
+  const semantic = await runGeminiJson(buildClaimValidationPrompt(body, evidenceSources));
+  const errors = [];
+  const warnings = [];
+  if (Array.isArray(semantic.uncited_factual_claims)) errors.push(...semantic.uncited_factual_claims.map(x => `Uncited factual claim: ${x}`));
+  if (Array.isArray(semantic.invalid_citations)) errors.push(...semantic.invalid_citations.map(n => `Citation [${n}] is unsupported or invalid.`));
+  for (const c of (semantic.claims || [])) {
+    if (c?.citation && c.supported === false) errors.push(`Citation [${c.citation}] does not support: ${c.claim}`);
+  }
+  const missingEvidence = evidenceSources.filter(s => s.fetch_error).map(s => `Could not verify source: ${s.title || s.url} (${s.fetch_error})`);
+  if (missingEvidence.length) errors.push(...missingEvidence);
+  for (const s of evidenceSources) if (s.original_url && s.original_url !== s.url && /news\.google\.com$/i.test(s.original_url)) warnings.push(`Replaced Google News redirect for: ${s.title}`);
+
+  const cited = [...new Set(rawIds)].map(n => ({ article_citation:n, source:n, primary_score:primarySourceScore(evidenceSources[n-1]), title:evidenceSources[n-1]?.title || "" }));
+  errors.unshift(...structuralErrors);
+  return {
+    valid: errors.length === 0 && semantic.overall_valid !== false,
+    status: errors.length === 0 && semantic.overall_valid !== false ? "validated" : "failed",
+    errors, warnings, claims_checked: Array.isArray(semantic.claims) ? semantic.claims.length : 0,
+    citations_checked: rawIds.length, source_count:sources.length, citation_map:cited,
+    semantic, sources:evidenceSources.map(s=>({title:s.title,publisher:s.publisher,url:s.url,original_url:s.original_url,fetch_error:s.fetch_error}))
+  };
+}
+
+async function persistResolvedSources(articleId, sources) {
+  for (const s of sources || []) {
+    if (s.url && s.url !== s.original_url) {
+      await supabase.from("media_sources").update({ url:s.url }).eq("article_id", articleId).eq("url", s.original_url);
+    }
+  }
 }
 
 function escapeHtml(value) {
@@ -637,20 +777,24 @@ async function createMediaDraftFromTopic(topicOverride = null) {
   try {
     const sources = await mediaResearch(topic.topic);
     const article = await generateMediaArticle(topic, sources);
+    const validation = await validateArticleCitations({ article, sources });
     let slug = mediaSlugify(article.title);
     const { data: existing } = await supabase.from("media_articles").select("id").eq("slug", slug).maybeSingle();
     if (existing) slug = `${slug}-${Date.now()}`;
     const author = await supabase.from("media_authors").select("id").eq("slug", "jabari").maybeSingle();
     const { data: saved, error } = await supabase.from("media_articles").insert({
-      title: article.title, slug, excerpt: article.excerpt || "", content: article.content || "", category_id: topic.category_id || null,
+      title: article.title, slug, excerpt: article.excerpt || "", content: normalizeCitationsAndBuildSources(article.content, sources), category_id: topic.category_id || null,
       author_id: author?.data?.id || null, status: "draft", article_type: "article", seo_title: article.seo_title || article.title,
-      meta_description: article.meta_description || article.excerpt || ""
+      meta_description: article.meta_description || article.excerpt || "", citation_validation_status: validation.status,
+      citation_validation_at: new Date().toISOString(), citation_validation_report: validation
     }).select("*").single();
     if (error) throw error;
     await saveMediaSources(saved.id, sources, article.content || "");
+    await persistResolvedSources(saved.id, validation.sources || []);
     await supabase.from("media_topics").update({ status: "published", used_at: new Date().toISOString() }).eq("id", topic.id);
+    await supabase.from("media_automation_logs").insert({ action:"citation_guard", status:validation.status, article_id:saved.id, topic_id:topic.id, message:validation.valid ? "Citation Guard passed." : `Citation Guard failed: ${validation.errors.slice(0,3).join(" | ")}` });
     await supabase.from("media_automation_logs").insert({ action:"generate_article", status:"success", article_id:saved.id, topic_id:topic.id, message:`Draft created from topic: ${topic.topic}` });
-    return { topic, article: saved, sources };
+    return { topic, article: saved, sources, validation };
   } catch (e) {
     const nextStatus = isTransientGeminiError(e) ? "queued" : "failed";
     await supabase.from("media_topics").update({ status: nextStatus }).eq("id", topic.id);
@@ -659,7 +803,24 @@ async function createMediaDraftFromTopic(topicOverride = null) {
   }
 }
 
+async function validateStoredMediaArticle(id) {
+  const { data: article, error } = await supabase.from("media_articles").select("*").eq("id", id).single();
+  if (error) throw error;
+  if (article.status === "published") throw new Error("Published articles do not need draft validation.");
+  const { data: sources, error: sourceError } = await supabase.from("media_sources").select("id,title,url,publisher,published_at").eq("article_id", id).order("id", { ascending:true });
+  if (sourceError) throw sourceError;
+  if (!sources?.length) throw new Error("This article has no saved research sources to validate against.");
+  const validation = await validateArticleCitations({ article, sources });
+  await supabase.from("media_articles").update({ citation_validation_status:validation.status, citation_validation_at:new Date().toISOString(), citation_validation_report:validation, updated_at:new Date().toISOString() }).eq("id", id);
+  await persistResolvedSources(id, validation.sources || []);
+  await supabase.from("media_automation_logs").insert({ action:"citation_guard", status:validation.status, article_id:id, message:validation.valid ? "Citation Guard passed." : `Citation Guard failed: ${validation.errors.slice(0,3).join(" | ")}` });
+  return { article, validation };
+}
+
 async function publishMediaArticle(id) {
+  const { data: check, error: checkError } = await supabase.from("media_articles").select("id,title,status,citation_validation_status").eq("id", id).single();
+  if (checkError) throw checkError;
+  if (check.citation_validation_status !== "validated") throw new Error("Publishing blocked: this article has not passed Jabari Citation Guard.");
   const { data, error } = await supabase.from("media_articles").update({ status:"published", published_at:new Date().toISOString(), updated_at:new Date().toISOString() }).eq("id", id).in("status", ["draft","review"]).select("*").single();
   if (error) throw error;
   await supabase.from("media_automation_logs").insert({ action:"publish_article", status:"success", article_id:id, message:`Published: ${data.title}` });
@@ -668,7 +829,7 @@ async function publishMediaArticle(id) {
 }
 
 async function getMediaDrafts() {
-  const { data, error } = await supabase.from("media_articles").select("id,title,status,created_at,media_categories(name)").in("status", ["draft","review"]).order("created_at", { ascending:false }).limit(10);
+  const { data, error } = await supabase.from("media_articles").select("id,title,status,created_at,citation_validation_status,media_categories(name)").in("status", ["draft","review"]).order("created_at", { ascending:false }).limit(10);
   if (error) throw error;
   return data || [];
 }
@@ -1295,15 +1456,21 @@ Status: Draft` : `ℹ️ ${r.message}`, {reply_markup:{inline_keyboard:[[btn("�
     if (data === "media_drafts") return showMediaDrafts(chatId,messageId);
     if (data.startsWith("media_draft:")) {
       const id = Number(data.split(":")[1]);
-      const { data: d, error } = await supabase.from("media_articles").select("id,title,excerpt,status").eq("id",id).single();
+      const { data: d, error } = await supabase.from("media_articles").select("id,title,excerpt,status,citation_validation_status").eq("id",id).single();
       if (error) throw error;
-      return safeEdit(chatId,messageId,`📝 Draft
-
-${d.title}
-
-${d.excerpt || "No excerpt"}
-
-Status: ${d.status}`,{inline_keyboard:[[btn("🚀 Publish","media_publish:"+id)],[btn("🗑️ Delete","media_delete:"+id)],[btn("⬅️ Drafts","media_drafts")]]});
+      return safeEdit(chatId,messageId,`📝 Draft\n\n${d.title}\n\n${d.excerpt || "No excerpt"}\n\nStatus: ${d.status}\nCitation Guard: ${d.citation_validation_status || "not run"}`,{inline_keyboard:[[btn("🔍 Validate",`media_validate:${id}`)],[btn("🚀 Publish","media_publish:"+id)],[btn("🗑️ Delete","media_delete:"+id)],[btn("⬅️ Drafts","media_drafts")]]});
+    }
+    if (data.startsWith("media_validate:")) {
+      const id = Number(data.split(":")[1]);
+      await safeEdit(chatId,messageId,"🔍 Citation Guard is validating this draft…\n\nChecking citations, source URLs, source evidence and claim/source matches. The article will remain a Draft.");
+      try {
+        const result = await validateStoredMediaArticle(id);
+        const v = result.validation;
+        const detail = v.valid ? `✅ Citation Guard PASSED\n\nClaims checked: ${v.claims_checked}\nCitations checked: ${v.citations_checked}\nSources checked: ${v.source_count}\n\nThe article is still a Draft. It has only been marked validated.` : `❌ Citation Guard FAILED\n\nClaims checked: ${v.claims_checked}\nCitations checked: ${v.citations_checked}\n\n${v.errors.slice(0,6).map(x=>`• ${x}`).join("\n")}`;
+        return bot.sendMessage(chatId, detail, {reply_markup:{inline_keyboard:[[btn("📝 Open Draft",`media_draft:${id}`)],[btn("🤖 Media","menu_media")]]}});
+      } catch (e) {
+        return bot.sendMessage(chatId, `❌ Citation Guard could not complete.\n\n${e.message}`, {reply_markup:{inline_keyboard:[[btn("📝 Open Draft",`media_draft:${id}`)],[btn("🤖 Media","menu_media")]]}});
+      }
     }
     if (data.startsWith("media_publish:")) {
       const id = Number(data.split(":")[1]);
