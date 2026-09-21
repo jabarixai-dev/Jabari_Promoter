@@ -478,22 +478,57 @@ async function resolveDirectSourceUrl(url) {
 }
 
 async function mediaResearch(topic) {
-  const q = encodeURIComponent(`${topic} 2026`);
-  const url = `https://news.google.com/rss/search?q=${q}&hl=en-US&gl=US&ceid=US:en`;
-  const response = await fetch(url, { headers: { "User-Agent": "JabariMedia/1.0" } });
-  if (!response.ok) throw new Error(`Research search failed with HTTP ${response.status}.`);
-  const xml = await response.text();
-  const items = [...xml.matchAll(/<item>([\s\S]*?)<\/item>/gi)].slice(0, 8).map(m => m[1]);
-  const clean = value => String(value || "").replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1").replace(/<[^>]+>/g, "").replace(/&amp;/g,"&").replace(/&quot;/g,'"').replace(/&#39;/g,"'").trim();
-  const raw = items.map(item => ({
-    title: clean(item.match(/<title>([\s\S]*?)<\/title>/i)?.[1]),
-    url: clean(item.match(/<link>([\s\S]*?)<\/link>/i)?.[1]),
-    published_at: clean(item.match(/<pubDate>([\s\S]*?)<\/pubDate>/i)?.[1]),
-    publisher: clean(item.match(/<source[^>]*>([\s\S]*?)<\/source>/i)?.[1])
-  })).filter(x => x.title && x.url);
+  const baseTopic = String(topic || "").trim();
+  if (!baseTopic) throw new Error("Research topic is empty.");
+
+  // Use several focused searches so broad topics do not collapse to a single
+  // Google News result. Research remains private and is used only for writing
+  // and internal editorial verification.
+  const queries = [
+    `${baseTopic} 2026`,
+    `${baseTopic} official announcement documentation`,
+    `${baseTopic} blockchain AI agents identity wallets permissions reputation`,
+    `${baseTopic} testnet mainnet project news analysis`
+  ];
+
+  const clean = value => String(value || "")
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&amp;/g,"&").replace(/&quot;/g,'"').replace(/&#39;/g,"'")
+    .trim();
+
+  const byKey = new Map();
+  let successfulSearches = 0;
+
+  for (const searchQuery of queries) {
+    const q = encodeURIComponent(searchQuery);
+    const url = `https://news.google.com/rss/search?q=${q}&hl=en-US&gl=US&ceid=US:en`;
+    try {
+      const response = await fetch(url, { headers: { "User-Agent": "JabariMedia/1.0" } });
+      if (!response.ok) continue;
+      successfulSearches++;
+      const xml = await response.text();
+      const items = [...xml.matchAll(/<item>([\s\S]*?)<\/item>/gi)].slice(0, 8).map(m => m[1]);
+      for (const item of items) {
+        const row = {
+          title: clean(item.match(/<title>([\s\S]*?)<\/title>/i)?.[1]),
+          url: clean(item.match(/<link>([\s\S]*?)<\/link>/i)?.[1]),
+          published_at: clean(item.match(/<pubDate>([\s\S]*?)<\/pubDate>/i)?.[1]),
+          publisher: clean(item.match(/<source[^>]*>([\s\S]*?)<\/source>/i)?.[1])
+        };
+        if (!row.title || !row.url) continue;
+        const key = row.url.toLowerCase().replace(/[?#].*$/, "");
+        if (!byKey.has(key)) byKey.set(key, row);
+      }
+    } catch (e) {
+      console.error("Media research search failed:", e.message);
+    }
+  }
+
+  if (!successfulSearches || !byKey.size) throw new Error("Research search returned no usable sources.");
 
   const resolved = [];
-  for (const item of raw) {
+  for (const item of [...byKey.values()].slice(0, 12)) {
     const directUrl = await resolveDirectSourceUrl(item.url);
     resolved.push({ ...item, url: directUrl });
   }
@@ -510,12 +545,6 @@ function extractCitationIds(content, sourceCount) {
 
 function extractInvalidCitationIds(content, sourceCount) {
   return extractAllCitationIds(content).filter(n => !Number.isInteger(n) || n < 1 || n > sourceCount);
-}
-
-function stripGeneratedSourcesSection(content) {
-  return String(content || "")
-    .replace(/<hr\s*\/?><h2[^>]*>\s*Sources\s*<\/h2>[\s\S]*$/i, "")
-    .trim();
 }
 
 function stripGeneratedSourcesSection(content) {
@@ -600,7 +629,7 @@ function buildClaimValidationPrompt(articleBody, sources) {
     const evidence = s.evidence || "";
     return `SOURCE ${i + 1}\nTitle: ${s.title}\nPublisher: ${s.publisher || "Unknown"}\nURL: ${s.url}\nEvidence:\n${evidence || "[SOURCE COULD NOT BE FETCHED]"}`;
   }).join("\n\n");
-  return `You are Jabari Media's internal fact-checking and editorial verification system.\n\nValidate this independently written Jabari Media article against the private research supplied below.\n\nIMPORTANT:\n- The article intentionally contains NO visible citation markers.\n- The research sources are PRIVATE and must never be added to the article.\n- Do not require [1], [2], [3] or any other citation markers.\n- Do not require a Sources section.\n- Do not penalize the article for having no visible citations or source links.\n- Readers should see only the article itself and, later, Related Articles.\n- Every material factual/current claim must nevertheless be traceable internally to one or more supplied sources.\n- A claim is supported only when the supplied source evidence directly supports its factual substance.\n- Do not treat a source title alone as proof.\n- If a material claim cannot be verified from the supplied evidence, mark it unsupported.\n- Opinions, clearly labeled analysis, predictions, transitions and ordinary editorial framing do not require source support.\n- Do not invent evidence.\n- Prefer primary/official sources where reasonably available.\n\nARTICLE HTML:\n${articleBody}\n\nPRIVATE RESEARCH SOURCES:\n${sourceText}\n\nReturn JSON only:\n{"claims":[{"claim":"...","source_numbers":[1],"supported":true,"reason":"..."}],"unsupported_claims":["..."],"uncertain_claims":["..."],"source_quality":[{"source":1,"primary":true,"score":70,"reason":"..."}],"overall_valid":true,"summary":"..."}\n\nRules:\n- Report material factual/current claims, not every sentence.\n- source_numbers must identify the supplied research source(s) that directly support the claim.\n- supported=true only when the source evidence directly supports the claim.\n- unsupported_claims are claims that conflict with, go beyond, or lack support from the supplied evidence.\n- uncertain_claims are claims where the available evidence is insufficient to confidently verify them.\n- overall_valid=false if any material factual/current claim is unsupported or cannot be verified, or if required evidence is unavailable.\n- Do not make overall_valid=false merely because the article has no visible citations or Sources section.`;
+  return `You are Jabari Media's internal fact-checking and editorial verification system.\n\nValidate this independently written Jabari Media article against the private research supplied below.\n\nIMPORTANT:\n- The article intentionally contains NO visible citation markers.\n- The research sources are PRIVATE and must never be added to the article.\n- Do not require [1], [2], [3] or any other citation markers.\n- Do not require a Sources section.\n- Do not penalize the article for having no visible citations or source links.\n- Readers should see only the article itself and, later, Related Articles.\n- Every material factual/current claim must nevertheless be traceable internally to one or more supplied sources.\n- A claim is supported only when the supplied source evidence directly supports its factual substance.\n- Do not treat a source title alone as proof.\n- If a material claim cannot be verified from the supplied evidence, mark it unsupported.\n- Opinions, clearly labeled analysis, predictions, transitions and ordinary editorial framing do not require source support.\n- Do not invent evidence.\n- Prefer primary/official sources where reasonably available.\n\nARTICLE HTML:\n${articleBody}\n\nPRIVATE RESEARCH SOURCES:\n${sourceText}\n\nReturn JSON only:\n{"claims":[{"claim":"...","source_numbers":[1],"supported":true,"reason":"..."}],"unsupported_claims":["..."],"uncertain_claims":["..."],"source_quality":[{"source":1,"primary":true,"score":70,"reason":"..."}],"overall_valid":true,"summary":"..."}\n\nRules:\n- Report every material factual/current claim you identify in the article in the claims array, whether supported or not.\n- source_numbers must identify the supplied research source(s) that directly support the claim; use [] when none support it.\n- supported=true only when the source evidence directly supports the claim.\n- unsupported_claims are claims that conflict with or go materially beyond the supplied evidence.\n- uncertain_claims are claims where the available evidence is insufficient to confidently verify them.\n- overall_valid=false if any material factual/current claim is unsupported or cannot be verified, or if required evidence is unavailable.\n- Do not make overall_valid=false merely because the article has no visible citations or Sources section.`;
 }
 
 async function runGeminiJson(prompt, label = "Citation Guard") {
@@ -664,10 +693,20 @@ async function validateArticleCitations({ article, sources }) {
     reason: c?.reason || ""
   }));
 
+  // Never report zero claims merely because Gemini placed failures in a
+  // separate array. The Guard must show the actual number of material claims
+  // it evaluated.
+  const reportedClaims = [
+    ...claims.map(c => String(c?.claim || "").trim()),
+    ...(Array.isArray(semantic.unsupported_claims) ? semantic.unsupported_claims : []).map(x => String(x || "").trim()),
+    ...(Array.isArray(semantic.uncertain_claims) ? semantic.uncertain_claims : []).map(x => String(x || "").trim())
+  ].filter(Boolean);
+  const uniqueClaims = [...new Set(reportedClaims)];
+
   return {
     valid: errors.length === 0 && semantic.overall_valid !== false,
     status: errors.length === 0 && semantic.overall_valid !== false ? "validated" : "failed",
-    errors, warnings, claims_checked: claims.length, citations_checked: 0,
+    errors, warnings, claims_checked: uniqueClaims.length, citations_checked: 0,
     source_count: evidenceSources.length, citation_map: sourceMap, semantic,
     sources: evidenceSources.map(s => ({ title:s.title, publisher:s.publisher, url:s.url, original_url:s.original_url, fetch_error:s.fetch_error }))
   };
