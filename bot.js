@@ -785,14 +785,12 @@ async function createMediaDraftFromTopic(topicOverride = null) {
     const { data: saved, error } = await supabase.from("media_articles").insert({
       title: article.title, slug, excerpt: article.excerpt || "", content: normalizeCitationsAndBuildSources(article.content, sources), category_id: topic.category_id || null,
       author_id: author?.data?.id || null, status: "draft", article_type: "article", seo_title: article.seo_title || article.title,
-      meta_description: article.meta_description || article.excerpt || "", citation_validation_status: validation.status,
-      citation_validation_at: new Date().toISOString(), citation_validation_report: validation
+      meta_description: article.meta_description || article.excerpt || "",
     }).select("*").single();
     if (error) throw error;
     await saveMediaSources(saved.id, sources, article.content || "");
     await persistResolvedSources(saved.id, validation.sources || []);
     await supabase.from("media_topics").update({ status: "published", used_at: new Date().toISOString() }).eq("id", topic.id);
-    await supabase.from("media_automation_logs").insert({ action:"citation_guard", status:validation.status, article_id:saved.id, topic_id:topic.id, message:validation.valid ? "Citation Guard passed." : `Citation Guard failed: ${validation.errors.slice(0,3).join(" | ")}` });
     await supabase.from("media_automation_logs").insert({ action:"generate_article", status:"success", article_id:saved.id, topic_id:topic.id, message:`Draft created from topic: ${topic.topic}` });
     return { topic, article: saved, sources, validation };
   } catch (e) {
@@ -811,25 +809,31 @@ async function validateStoredMediaArticle(id) {
   if (sourceError) throw sourceError;
   if (!sources?.length) throw new Error("This article has no saved research sources to validate against.");
   const validation = await validateArticleCitations({ article, sources });
-  await supabase.from("media_articles").update({ citation_validation_status:validation.status, citation_validation_at:new Date().toISOString(), citation_validation_report:validation, updated_at:new Date().toISOString() }).eq("id", id);
   await persistResolvedSources(id, validation.sources || []);
   await supabase.from("media_automation_logs").insert({ action:"citation_guard", status:validation.status, article_id:id, message:validation.valid ? "Citation Guard passed." : `Citation Guard failed: ${validation.errors.slice(0,3).join(" | ")}` });
   return { article, validation };
 }
 
 async function publishMediaArticle(id) {
-  const { data: check, error: checkError } = await supabase.from("media_articles").select("id,title,status,citation_validation_status").eq("id", id).single();
-  if (checkError) throw checkError;
-  if (check.citation_validation_status !== "validated") throw new Error("Publishing blocked: this article has not passed Jabari Citation Guard.");
+  const { data: article, error: articleError } = await supabase.from("media_articles").select("*").eq("id", id).single();
+  if (articleError) throw articleError;
+  if (article.status === "published") return article;
+  const { data: sources, error: sourceError } = await supabase.from("media_sources").select("id,title,url,publisher,published_at").eq("article_id", id).order("id", { ascending:true });
+  if (sourceError) throw sourceError;
+  if (!sources?.length) throw new Error("Publishing blocked: this article has no saved research sources.");
+  const validation = await validateArticleCitations({ article, sources });
+  if (!validation.valid) {
+    throw new Error(`Publishing blocked by Citation Guard.\n\n${validation.errors.slice(0,6).map(x => `• ${x}`).join("\n")}`);
+  }
+  await persistResolvedSources(id, validation.sources || []);
   const { data, error } = await supabase.from("media_articles").update({ status:"published", published_at:new Date().toISOString(), updated_at:new Date().toISOString() }).eq("id", id).in("status", ["draft","review"]).select("*").single();
   if (error) throw error;
-  await supabase.from("media_automation_logs").insert({ action:"publish_article", status:"success", article_id:id, message:`Published: ${data.title}` });
-  await ensureMediaPromotion(data);
+  await startMediaPromotion(data.id);
   return data;
 }
 
 async function getMediaDrafts() {
-  const { data, error } = await supabase.from("media_articles").select("id,title,status,created_at,citation_validation_status,media_categories(name)").in("status", ["draft","review"]).order("created_at", { ascending:false }).limit(10);
+  const { data, error } = await supabase.from("media_articles").select("id,title,status,created_at,media_categories(name)").in("status", ["draft","review"]).order("created_at", { ascending:false }).limit(10);
   if (error) throw error;
   return data || [];
 }
@@ -1456,9 +1460,9 @@ Status: Draft` : `ℹ️ ${r.message}`, {reply_markup:{inline_keyboard:[[btn("�
     if (data === "media_drafts") return showMediaDrafts(chatId,messageId);
     if (data.startsWith("media_draft:")) {
       const id = Number(data.split(":")[1]);
-      const { data: d, error } = await supabase.from("media_articles").select("id,title,excerpt,status,citation_validation_status").eq("id",id).single();
+      const { data: d, error } = await supabase.from("media_articles").select("id,title,excerpt,status").eq("id",id).single();
       if (error) throw error;
-      return safeEdit(chatId,messageId,`📝 Draft\n\n${d.title}\n\n${d.excerpt || "No excerpt"}\n\nStatus: ${d.status}\nCitation Guard: ${d.citation_validation_status || "not run"}`,{inline_keyboard:[[btn("🔍 Validate",`media_validate:${id}`)],[btn("🚀 Publish","media_publish:"+id)],[btn("🗑️ Delete","media_delete:"+id)],[btn("⬅️ Drafts","media_drafts")]]});
+      return safeEdit(chatId,messageId,`📝 Draft\n\n${d.title}\n\n${d.excerpt || "No excerpt"}\n\nStatus: ${d.status}`,{inline_keyboard:[[btn("🔍 Validate",`media_validate:${id}`)],[btn("🚀 Publish","media_publish:"+id)],[btn("🗑️ Delete","media_delete:"+id)],[btn("⬅️ Drafts","media_drafts")]]});
     }
     if (data.startsWith("media_validate:")) {
       const id = Number(data.split(":")[1]);
