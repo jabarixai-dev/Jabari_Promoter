@@ -42,6 +42,7 @@ let oauthState = null;
 let scanResults = [];
 let scanPages = [];
 let scanSelected = new Set();
+let scanFilter = "all";
 let scanRunning = false;
 let mediaAutomationRunning = false;
 let mediaWorkerSecret = "";
@@ -208,6 +209,31 @@ function isLikelyTechnicalEmail(email) {
   if (technicalDomains.some(d => domain === d || domain.endsWith(`.${d}`))) return true;
   if (/(^|[._-])(telemetry|tracking|analytics|errors?|crash|logging)([._-]|$)/i.test(value)) return true;
   return false;
+}
+
+function classifyScannedEmail(email) {
+  const value = String(email || '').toLowerCase();
+  const local = value.split('@')[0] || '';
+  const generic = new Set([
+    'info','hello','contact','contacts','enquiries','enquiry','inquiries','inquiry',
+    'support','help','sales','marketing','admin','administrator','office','reception',
+    'team','staff','careers','hr','jobs','accounts','billing','finance','press','media',
+    'news','editor','editorial','partnerships','partners','booking','bookings','service',
+    'services','customerservice','customer-service','webmaster','postmaster','security',
+    'privacy','legal','feedback','community','admissions','admission'
+  ]);
+  const automated = /^(no[-_.]?reply|donotreply|do[-_.]?not[-_.]?reply|mailer[-_.]?daemon|bounce|notifications?|notification|automated|auto[-_.]?reply|noreply)$/i.test(local)
+    || /(^|[._-])(mailer|daemon|bounce|no[-_.]?reply|donotreply|notifications?)([._-]|$)/i.test(local);
+  if (automated) return 'automated';
+  if (generic.has(local) || /^(info|contact|support|sales|admin|office|team|hello)[0-9._-]*$/.test(local)) return 'business';
+  return 'personal';
+}
+
+function getScannedEmailsByFilter(filter = scanFilter) {
+  if (filter === 'personal') return scanResults.filter(email => classifyScannedEmail(email) === 'personal');
+  if (filter === 'business') return scanResults.filter(email => classifyScannedEmail(email) === 'business');
+  if (filter === 'automated') return scanResults.filter(email => classifyScannedEmail(email) === 'automated');
+  return scanResults;
 }
 
 function extractEmails(html) {
@@ -1199,19 +1225,28 @@ async function showScannerMenu(chatId, messageId) {
 
 function scannerResultsText() {
   if (!scanResults.length) return "🕵️ Scanner Results\n\nNo public email addresses were found.";
-  const selectedCount = scanResults.filter(email => scanSelected.has(email)).length;
-  return `🕵️ Scanner Results\n\nFound: ${scanResults.length}\nPages scanned: ${scanPages.length}\nSelected: ${selectedCount}\n\nTap an email to select/deselect it.`;
+  const personal = scanResults.filter(email => classifyScannedEmail(email) === 'personal').length;
+  const business = scanResults.filter(email => classifyScannedEmail(email) === 'business').length;
+  const automated = scanResults.filter(email => classifyScannedEmail(email) === 'automated').length;
+  const visible = getScannedEmailsByFilter();
+  const selectedCount = visible.filter(email => scanSelected.has(email)).length;
+  const label = scanFilter === 'personal' ? '👤 Public/direct contacts' : scanFilter === 'business' ? '🏢 General/business contacts' : scanFilter === 'automated' ? '🚫 Automated/system contacts' : '📋 All public contacts';
+  return `🕵️ Scanner Results\n\nFound: ${scanResults.length}\n👤 Public/direct: ${personal}\n🏢 General/business: ${business}\n🚫 Automated/system: ${automated}\nPages scanned: ${scanPages.length}\n\nView: ${label}\nVisible selected: ${selectedCount}`;
 }
 
 async function showScannerResults(chatId, messageId) {
   const rows = [];
-  if (scanResults.length) {
-    for (const email of scanResults.slice(0, 40)) {
+  const visible = getScannedEmailsByFilter();
+  rows.push([btn(`👤 People (${scanResults.filter(e => classifyScannedEmail(e) === 'personal').length})`, "scanner_filter:personal"), btn(`🏢 Business (${scanResults.filter(e => classifyScannedEmail(e) === 'business').length})`, "scanner_filter:business")]);
+  rows.push([btn(`🚫 Automated (${scanResults.filter(e => classifyScannedEmail(e) === 'automated').length})`, "scanner_filter:automated"), btn("📋 All", "scanner_filter:all")]);
+  if (visible.length) {
+    for (const email of visible.slice(0, 40)) {
       const mark = scanSelected.has(email) ? "☑️" : "⬜";
-      rows.push([btn(`${mark} ${email}`.slice(0, 60), `scanner_toggle:${encodeURIComponent(email)}`)]);
+      const tag = classifyScannedEmail(email) === 'personal' ? '👤' : classifyScannedEmail(email) === 'automated' ? '🚫' : '🏢';
+      rows.push([btn(`${mark} ${tag} ${email}`.slice(0, 60), `scanner_toggle:${encodeURIComponent(email)}`)]);
     }
-    if (scanResults.length > 40) rows.push([btn(`…and ${scanResults.length - 40} more`, "scanner_noop")]);
-    rows.push([btn("➕ Add Selected", "scanner_add_selected"), btn("➕ Add All", "scanner_add_all")]);
+    if (visible.length > 40) rows.push([btn(`…and ${visible.length - 40} more`, "scanner_noop")]);
+    rows.push([btn("➕ Add Selected", "scanner_add_selected"), btn("➕ Add Visible", "scanner_add_visible")]);
   }
   rows.push([btn("🕵️ Scan Another Website", "scanner_website")]);
   rows.push([btn("⬅️ Scanner", "menu_scanner")]);
@@ -1417,6 +1452,7 @@ bot.on("message", async msg => {
           scanResults = result.emails;
           scanPages = result.pages;
           scanSelected = new Set(scanResults);
+          scanFilter = "all";
           try { await showScannerResults(msg.chat.id, progress.message_id); } catch (_) { await showScannerResults(msg.chat.id); }
         } catch (e) {
           console.error("Website scanner error:", e.message);
@@ -1640,6 +1676,11 @@ Status: ${t.status}`,{inline_keyboard:[[btn("✍️ Generate","media_generate_to
       return safeEdit(chatId, messageId, "🌐 Scan Website\n\nSend the public website URL you want to scan.\n\nExample:\nhttps://example.com", { inline_keyboard: [[btn("❌ Cancel", "scanner_cancel")]] });
     }
     if (data === "scanner_results") return showScannerResults(chatId, messageId);
+    if (data.startsWith("scanner_filter:")) {
+      const filter = data.slice("scanner_filter:".length);
+      scanFilter = ["all", "personal", "business", "automated"].includes(filter) ? filter : "all";
+      return showScannerResults(chatId, messageId);
+    }
     if (data === "scanner_noop") return answer(q);
     if (data.startsWith("scanner_toggle:")) {
       const email = decodeURIComponent(data.slice("scanner_toggle:".length));
@@ -1654,6 +1695,12 @@ Status: ${t.status}`,{inline_keyboard:[[btn("✍️ Generate","media_generate_to
       if (!selected.length) return safeEdit(chatId, messageId, "Please select at least one email first.", { inline_keyboard: [[btn("👀 View Results", "scanner_results")], [btn("🕵️ Scanner", "menu_scanner")]] });
       const added = await addScannedEmails(selected);
       return safeEdit(chatId, messageId, `✅ Selected scanner results added.\n\nNew contacts: ${added}\nAlready in contacts: ${selected.length - added}`, { inline_keyboard: [[btn("👥 Contacts", "menu_contacts")], [btn("🕵️ Scanner", "menu_scanner")]] });
+    }
+    if (data === "scanner_add_visible") {
+      const visible = getScannedEmailsByFilter();
+      if (!visible.length) return showScannerResults(chatId, messageId);
+      const added = await addScannedEmails(visible);
+      return safeEdit(chatId, messageId, `✅ Visible scanner results added.\n\nNew contacts: ${added}\nAlready in contacts: ${visible.length - added}`, { inline_keyboard: [[btn("👥 Contacts", "menu_contacts")], [btn("🕵️ Scanner", "menu_scanner")]] });
     }
     if (data === "scanner_add_all") {
       if (!scanResults.length) return showScannerResults(chatId, messageId);
