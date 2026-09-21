@@ -609,8 +609,9 @@ async function resolveAndRefreshSources(sources) {
 
 function buildClaimValidationPrompt(articleBody, sources) {
   const sourceText = sources.map((s, i) => {
+    const number = Number(s.source_number || i + 1);
     const evidence = s.evidence || "";
-    return `SOURCE ${i + 1}\nTitle: ${s.title}\nPublisher: ${s.publisher || "Unknown"}\nURL: ${s.url}\nEvidence:\n${evidence || "[SOURCE COULD NOT BE FETCHED]"}`;
+    return `SOURCE ${number}\nTitle: ${s.title}\nPublisher: ${s.publisher || "Unknown"}\nURL: ${s.url}\nEvidence:\n${evidence || "[SOURCE COULD NOT BE FETCHED]"}`;
   }).join("\n\n");
   return `You are Jabari Citation Guard. Validate an already-written journalistic article against the supplied source evidence. Be conservative: a claim is supported only when the cited source directly supports the factual substance of the claim. Do not infer missing facts. Do not treat a source title alone as proof. Current/factual claims must have citations. Opinions, clearly labeled analysis, and transitions do not need citations.\n\nARTICLE HTML:\n${articleBody}\n\n${sourceText}\n\nReturn JSON only with this exact structure:\n{"claims":[{"claim":"...","citation":1,"supported":true,"reason":"..."}],"uncited_factual_claims":["..."],"invalid_citations":[1],"source_quality":[{"source":1,"primary":true,"score":70,"reason":"..."}],"overall_valid":true,"summary":"..."}\n\nRules:\n- Report material factual/current claims, not every sentence.\n- citation must be the source number immediately associated with the claim; use null if no citation.\n- supported=true only if the cited source directly supports the claim.\n- invalid_citations contains citation numbers that cannot support the cited claim or do not exist.\n- source_quality should assess whether a source is primary/official where relevant.\n- overall_valid=false if any material factual/current claim is uncited, any citation is invalid/unsupported, or required evidence cannot be verified.\n- Prefer primary/official sources when they are available among the supplied sources, but do not fail an article merely because a secondary source is used when no primary source is reasonably available.`;
 }
@@ -643,36 +644,61 @@ async function validateArticleCitations({ article, sources }) {
   const rawContent = String(article.content || "");
   const body = stripGeneratedSourcesSection(rawContent);
   const rawIds = extractAllCitationIds(body);
+  const uniqueIds = [...new Set(rawIds)];
   const sourcesHeadingPresent = /<h2[^>]*>\s*Sources\s*<\/h2>/i.test(rawContent);
-  const sourceListItems = (rawContent.match(/<li[\s>]/gi) || []).length;
   const structuralErrors = [];
-  if (!sourcesHeadingPresent) structuralErrors.push("The article is missing its Sources section.");
-  if (rawIds.length && sourceListItems < new Set(rawIds).size) structuralErrors.push("The Sources section does not contain every cited source.");
-  const invalidNumbers = rawIds.filter(n => n < 1 || n > sources.length);
-  if (!rawIds.length) return { valid:false, status:"failed", errors:[...structuralErrors, "The article contains no citations."], warnings:[], claims_checked:0, citations_checked:0, source_count:sources.length, citation_map:[] };
-  if (invalidNumbers.length) return { valid:false, status:"failed", errors:[...structuralErrors, `Citation number(s) do not exist: ${[...new Set(invalidNumbers)].map(n=>`[${n}]`).join(", ")}.`], warnings:[], claims_checked:0, citations_checked:rawIds.length, source_count:sources.length, citation_map:[] };
 
-  const evidenceSources = await resolveAndRefreshSources(sources);
+  // Structural checks are independent of semantic/source fetching.
+  if (!sourcesHeadingPresent) structuralErrors.push("The article is missing its Sources section.");
+  const invalidNumbers = uniqueIds.filter(n => n < 1 || n > sources.length);
+  if (!rawIds.length) {
+    return { valid:false, status:"failed", errors:[...structuralErrors, "The article contains no citations."], warnings:[], claims_checked:0, citations_checked:0, source_count:sources.length, citation_map:[] };
+  }
+  if (invalidNumbers.length) {
+    return { valid:false, status:"failed", errors:[...structuralErrors, `Citation number(s) do not exist: ${invalidNumbers.map(n=>`[${n}]`).join(", ")}.`], warnings:[], claims_checked:0, citations_checked:rawIds.length, source_count:sources.length, citation_map:[] };
+  }
+
+  // Only fetch sources actually cited by the article. An inaccessible unused
+  // research result must not make an otherwise valid article fail.
+  const citedSourceRows = uniqueIds.map(n => ({ ...sources[n - 1], source_number: n }));
+  const evidenceSources = await resolveAndRefreshSources(citedSourceRows);
   const semantic = await runGeminiJson(buildClaimValidationPrompt(body, evidenceSources));
-  const errors = [];
+  const errors = [...structuralErrors];
   const warnings = [];
-  if (Array.isArray(semantic.uncited_factual_claims)) errors.push(...semantic.uncited_factual_claims.map(x => `Uncited factual claim: ${x}`));
-  if (Array.isArray(semantic.invalid_citations)) errors.push(...semantic.invalid_citations.map(n => `Citation [${n}] is unsupported or invalid.`));
+
+  if (Array.isArray(semantic.uncited_factual_claims)) {
+    errors.push(...semantic.uncited_factual_claims.map(x => `Uncited factual claim: ${x}`));
+  }
+  if (Array.isArray(semantic.invalid_citations)) {
+    errors.push(...semantic.invalid_citations.map(n => `Citation [${n}] is unsupported or invalid.`));
+  }
   for (const c of (semantic.claims || [])) {
     if (c?.citation && c.supported === false) errors.push(`Citation [${c.citation}] does not support: ${c.claim}`);
   }
-  const missingEvidence = evidenceSources.filter(s => s.fetch_error).map(s => `Could not verify source: ${s.title || s.url} (${s.fetch_error})`);
-  if (missingEvidence.length) errors.push(...missingEvidence);
-  for (const s of evidenceSources) if (s.original_url && s.original_url !== s.url && /news\.google\.com$/i.test(s.original_url)) warnings.push(`Replaced Google News redirect for: ${s.title}`);
 
-  const cited = [...new Set(rawIds)].map(n => ({ article_citation:n, source:n, primary_score:primarySourceScore(evidenceSources[n-1]), title:evidenceSources[n-1]?.title || "" }));
-  errors.unshift(...structuralErrors);
+  // A retrieval failure is reported as a verification problem, not as proof
+  // that the claim itself is false or unsupported. It still blocks publishing.
+  const missingEvidence = evidenceSources.filter(s => s.fetch_error).map(s => `Could not verify cited source [${s.source_number}]: ${s.title || s.url} (${s.fetch_error})`);
+  if (missingEvidence.length) errors.push(...missingEvidence);
+  for (const s of evidenceSources) {
+    if (s.original_url && s.original_url !== s.url && /news\.google\.com$/i.test(s.original_url)) {
+      warnings.push(`Replaced Google News redirect for: ${s.title}`);
+    }
+  }
+
+  const cited = evidenceSources.map(s => ({
+    article_citation: s.source_number,
+    source: s.source_number,
+    primary_score: primarySourceScore(s),
+    title: s.title || ""
+  }));
+
   return {
     valid: errors.length === 0 && semantic.overall_valid !== false,
     status: errors.length === 0 && semantic.overall_valid !== false ? "validated" : "failed",
     errors, warnings, claims_checked: Array.isArray(semantic.claims) ? semantic.claims.length : 0,
     citations_checked: rawIds.length, source_count:sources.length, citation_map:cited,
-    semantic, sources:evidenceSources.map(s=>({title:s.title,publisher:s.publisher,url:s.url,original_url:s.original_url,fetch_error:s.fetch_error}))
+    semantic, sources:evidenceSources.map(s=>({source_number:s.source_number,title:s.title,publisher:s.publisher,url:s.url,original_url:s.original_url,fetch_error:s.fetch_error}))
   };
 }
 
@@ -1000,6 +1026,7 @@ async function showMediaMenu(chatId, messageId) {
   const rows = [
     [btn("➕ Add Topic", "media_add_topic"), btn("📚 Topics", "media_topics")],
     [btn("✍️ Generate Next", "media_generate"), btn("📝 Drafts", "media_drafts")],
+    [btn("📢 Published", "media_published")],
     [btn("⚙️ Autopilot", "media_autopilot")],
     [btn("🏠 Main Menu", "menu_main")]
   ];
@@ -1013,6 +1040,64 @@ async function showMediaAutopilot(chatId, messageId) {
   const rows = [[btn(a.enabled ? "🔴 Turn OFF" : "🟢 Turn ON", "media_toggle_auto")],[btn("▶️ Run Now", "media_run_now")],[btn("📝 Mode: " + a.mode, "media_mode")],[btn("⏱ Frequency: " + a.publishing_frequency, "media_frequency")],[btn("⬅️ Media", "menu_media")]];
   if (messageId) return safeEdit(chatId,messageId,text,{inline_keyboard:rows});
   return bot.sendMessage(chatId,text,{reply_markup:{inline_keyboard:rows}});
+}
+
+async function getMediaPublished() {
+  const { data, error } = await supabase.from("media_articles")
+    .select("id,title,status,published_at,created_at,slug")
+    .eq("status", "published")
+    .order("published_at", { ascending:false })
+    .limit(20);
+  if (error) throw error;
+  return data || [];
+}
+
+async function deletePublishedMediaArticle(id) {
+  const { data: article, error: articleError } = await supabase.from("media_articles")
+    .select("id,title,status")
+    .eq("id", id).single();
+  if (articleError) throw articleError;
+  if (article.status !== "published") throw new Error("This article is not published.");
+
+  // Stop active promotion first. External emails/social posts cannot be
+  // recalled, so the bot only stops Jabari's own active promotion job.
+  await stopMediaPromotion(id, "article_deleted");
+
+  // Remove article-owned records while leaving unrelated research untouched.
+  const { data: jobs } = await supabase.from("media_promotions").select("id").eq("article_id", id);
+  for (const job of jobs || []) {
+    await supabase.from("media_promotion_recipients").delete().eq("promotion_id", job.id);
+  }
+  await supabase.from("media_promotions").delete().eq("article_id", id);
+  await supabase.from("media_sources").delete().eq("article_id", id);
+  await supabase.from("media_automation_logs").delete().eq("article_id", id);
+  const { error } = await supabase.from("media_articles").delete().eq("id", id);
+  if (error) throw error;
+  return article;
+}
+
+async function showMediaPublished(chatId, messageId) {
+  const articles = await getMediaPublished();
+  if (!articles.length) {
+    return safeEdit(chatId, messageId, "📢 Published\n\nNo published articles yet.", { inline_keyboard:[[btn("⬅️ Media","menu_media")]] });
+  }
+  const rows = articles.map(a => [btn(`📢 ${a.title}`.slice(0,55), `media_published:${a.id}`)]);
+  rows.push([btn("⬅️ Media","menu_media")]);
+  return safeEdit(chatId, messageId, "📢 Published Articles\n\nSelect an article to view its status or delete it.", { inline_keyboard:rows });
+}
+
+async function showPublishedArticle(chatId, messageId, id) {
+  const { data: article, error } = await supabase.from("media_articles")
+    .select("id,title,status,published_at,slug")
+    .eq("id", id).eq("status", "published").single();
+  if (error) throw error;
+  const promotion = await getMediaPromotion(id);
+  const promotionText = promotion ? `${promotion.status} — ${promotion.successful_count}/${promotion.target_count}` : "No promotion job";
+  const published = article.published_at ? formatAutopilotDate(article.published_at) : "Unknown";
+  return safeEdit(chatId, messageId, `📢 Published Article\n\n${article.title}\n\nPublished: ${published}\nPromotion: ${promotionText}\n\nDeleting the article removes Jabari's stored article, sources and promotion records. Previously sent external emails cannot be recalled.`, { inline_keyboard:[
+    [btn("🗑️ Delete Article", `media_published_delete:${id}`)],
+    [btn("⬅️ Published", "media_published")]
+  ]});
 }
 
 async function showMediaDrafts(chatId,messageId) {
@@ -1458,6 +1543,20 @@ Status: Draft` : `ℹ️ ${r.message}`, {reply_markup:{inline_keyboard:[[btn("�
       }
     }
     if (data === "media_drafts") return showMediaDrafts(chatId,messageId);
+    if (data === "media_published") return showMediaPublished(chatId,messageId);
+    if (data.startsWith("media_published:")) return showPublishedArticle(chatId,messageId,Number(data.split(":")[1]));
+    if (data.startsWith("media_published_delete:")) {
+      const id = Number(data.split(":")[1]);
+      const { data: article, error } = await supabase.from("media_articles").select("id,title,status").eq("id",id).single();
+      if (error) throw error;
+      if (article.status !== "published") return showMediaPublished(chatId,messageId);
+      return safeEdit(chatId,messageId,`⚠️ Delete Published Article\n\n${article.title}\n\nThis will remove the article from Jabari Media and stop its active promotion. Previously sent external emails cannot be recalled.\n\nAre you sure?`,{inline_keyboard:[[btn("⚠️ Yes, Delete",`media_published_delete_yes:${id}`)],[btn("❌ Cancel",`media_published:${id}`)]]});
+    }
+    if (data.startsWith("media_published_delete_yes:")) {
+      const id = Number(data.split(":")[1]);
+      const deleted = await deletePublishedMediaArticle(id);
+      return safeEdit(chatId,messageId,`🗑️ Article deleted\n\n${deleted.title} has been removed from Jabari Media.`,{inline_keyboard:[[btn("📢 Published","media_published")],[btn("🤖 Media","menu_media")]]});
+    }
     if (data.startsWith("media_draft:")) {
       const id = Number(data.split(":")[1]);
       const { data: d, error } = await supabase.from("media_articles").select("id,title,excerpt,status").eq("id",id).single();
