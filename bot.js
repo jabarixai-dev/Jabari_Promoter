@@ -796,6 +796,66 @@ async function saveMediaSources(articleId, sources, content) {
   return used;
 }
 
+
+async function extractOpenGraphImage(url) {
+  if (!url) return null;
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      redirect: "follow",
+      headers: { "User-Agent": "JabariMedia/1.0" },
+      signal: AbortSignal.timeout(12000)
+    });
+    if (!response.ok) return null;
+    const type = (response.headers.get("content-type") || "").toLowerCase();
+    if (!type.includes("text/html") && !type.includes("application/xhtml+xml")) return null;
+    const html = await response.text();
+    const patterns = [
+      /<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["'][^>]*>/i,
+      /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["'][^>]*>/i,
+      /<meta[^>]+property=["']og:image:url["'][^>]+content=["']([^"']+)["'][^>]*>/i,
+      /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image:url["'][^>]*>/i,
+      /<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["'][^>]*>/i,
+      /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:image["'][^>]*>/i
+    ];
+    for (const re of patterns) {
+      const match = html.match(re);
+      if (!match?.[1]) continue;
+      const imageUrl = new URL(match[1].replace(/&amp;/g, "&"), response.url || url).href;
+      if (/^https?:\/\//i.test(imageUrl)) return imageUrl;
+    }
+  } catch {}
+  return null;
+}
+
+async function findMediaArticleImage(sources) {
+  for (const source of (sources || []).slice(0, 8)) {
+    const directUrl = source.url || await resolveDirectSourceUrl(source.url);
+    const imageUrl = await extractOpenGraphImage(directUrl);
+    if (imageUrl) {
+      return {
+        url: imageUrl,
+        publisher: source.publisher || "Source publisher",
+        source_url: directUrl,
+        title: source.title || "Article image"
+      };
+    }
+  }
+  return null;
+}
+
+function addMediaFeaturedImage(content, image) {
+  if (!image?.url) return String(content || "");
+  const safeUrl = escapeAttribute(image.url);
+  const safeAlt = escapeHtml(image.title || "Jabari Media article image");
+  const safePublisher = escapeHtml(image.publisher || "Source publisher");
+  const figure = `<figure class="jabari-media-featured-image" style="margin:0 0 28px;">`+
+    `<img src="${safeUrl}" alt="${safeAlt}" loading="eager" style="display:block;width:100%;max-width:1200px;height:auto;object-fit:cover;border-radius:12px;">`+
+    `<figcaption style="margin-top:8px;font-size:12px;opacity:.7;">Image: ${safePublisher}</figcaption>`+
+    `</figure>`;
+  return `${figure}\n${String(content || "")}`;
+}
+
 async function createMediaDraftFromTopic(topicOverride = null) {
   const topic = topicOverride || await getNextMediaTopic();
   if (!topic) return { topic: null, article: null };
@@ -803,6 +863,9 @@ async function createMediaDraftFromTopic(topicOverride = null) {
   try {
     const sources = await mediaResearch(topic.topic);
     const article = await generateMediaArticle(topic, sources);
+    const featuredImage = await findMediaArticleImage(sources);
+    if (!featuredImage) throw new Error("No corresponding article image could be found from the researched publishers. The article was kept out of publication.");
+    article.content = addMediaFeaturedImage(article.content, featuredImage);
     const validation = await validateArticleCitations({ article, sources });
     let slug = mediaSlugify(article.title);
     const { data: existing } = await supabase.from("media_articles").select("id").eq("slug", slug).maybeSingle();
