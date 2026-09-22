@@ -1,12 +1,12 @@
 require("dotenv").config();
 
 const http = require("http");
-const https = require("https");
 const crypto = require("crypto");
 const dns = require("dns").promises;
 const TelegramBot = require("node-telegram-bot-api");
 const { createClient } = require("@supabase/supabase-js");
 const websiteBlog = require("./lib/website/blog");
+const websiteShop = require("./lib/website/shop");
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const ownerId = String(process.env.BOT_OWNER_ID || "");
@@ -415,6 +415,7 @@ function mainMenuText() {
 function mainMenu() {
   return menu([
     [btn("📝 Campaigns", "menu_campaigns"), btn("🌐 Website Blog", "menu_website_blog")],
+    [btn("🛍️ Website Shop", "menu_website_shop")],
     [btn("👥 Contacts", "menu_contacts"), btn("📧 Promote", "menu_promote")],
     [btn("🕵️ Email Scanner", "menu_scanner"), btn("📊 Status", "menu_status")],
     [btn("🧪 Test Email", "menu_testemail")]
@@ -491,6 +492,120 @@ async function startWebsiteBlogWizard(chatId, messageId, mode, post = null) {
     inline_keyboard: [[btn("❌ Cancel", "website_blog_cancel")]]
   });
 }
+
+async function showWebsiteShopMenu(chatId, messageId) {
+  const products = await websiteShop.listProducts();
+  const text = `🛍️ Website Shop
+
+Products in GitHub: ${products.length}
+
+This uses the same shop/products.json as the Jabari website.`;
+
+  const rows = [
+    [btn("📋 View Products", "website_shop_list")],
+    [btn("➕ New Product", "website_shop_create")],
+    [btn("🔄 Refresh", "menu_website_shop")],
+    [btn("⬅️ Back", "menu_main")]
+  ];
+
+  if (messageId) return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
+  return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: rows } });
+}
+
+async function showWebsiteShopList(chatId, messageId) {
+  const products = await websiteShop.listProducts();
+
+  if (!products.length) {
+    const kb = {
+      inline_keyboard: [
+        [btn("➕ New Product", "website_shop_create")],
+        [btn("⬅️ Back", "menu_website_shop")]
+      ]
+    };
+
+    const text = "📋 Website Shop\n\nNo products found.";
+
+    if (messageId) return safeEdit(chatId, messageId, text, kb);
+    return bot.sendMessage(chatId, text, { reply_markup: kb });
+  }
+
+  const rows = products.slice(0, 30).map(p => [
+    btn(
+      `${p.active === false ? "⚪" : "🟢"} ${p.title || "Untitled"} — ₦${Number(p.priceNaira || 0).toLocaleString()}`.slice(0, 60),
+      `website_shop_view:${p.slug}`
+    )
+  ]);
+
+  rows.push([btn("➕ New Product", "website_shop_create")]);
+  rows.push([btn("⬅️ Back", "menu_website_shop")]);
+
+  const text =
+    `📋 Website Shop\n\nShowing ${Math.min(products.length, 30)} of ${products.length} products.`;
+
+  if (messageId) return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
+  return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: rows } });
+}
+
+async function showWebsiteShopDetails(chatId, messageId, slug) {
+  const products = await websiteShop.listProducts();
+  const p = products.find(x => String(x.slug) === String(slug));
+
+  if (!p) throw new Error("Shop product not found.");
+
+  const text =
+    `🛍️ ${p.title}\n\n` +
+    `Price: ₦${Number(p.priceNaira || 0).toLocaleString()}\n` +
+    `Status: ${p.active === false ? "⚪ Inactive" : "🟢 Active"}\n` +
+    `PDF: ${p.file || "—"}\n\n` +
+    `${p.desc || ""}`;
+
+  const toggle = p.active === false ? "🟢 Activate" : "⚪ Deactivate";
+
+  const kb = {
+    inline_keyboard: [
+      [
+        btn("✏️ Edit", `website_shop_edit:${p.slug}`),
+        btn(toggle, `website_shop_toggle:${p.slug}`)
+      ],
+      [btn("🗑️ Delete", `website_shop_delete:${p.slug}`)],
+      [btn("⬅️ Back", "website_shop_list")]
+    ]
+  };
+
+  if (messageId) return safeEdit(chatId, messageId, text, kb);
+  return bot.sendMessage(chatId, text, { reply_markup: kb });
+}
+
+async function startWebsiteShopWizard(chatId, messageId, mode, product = null) {
+  inputState = {
+    chatId,
+    type: mode === "edit" ? "website_shop_edit" : "website_shop_create",
+    step: "title",
+    slug: product?.slug || "",
+    title: product?.title || "",
+    desc: product?.desc || "",
+    priceNaira: product?.priceNaira || "",
+    file: product?.file || ""
+  };
+
+  const heading =
+    mode === "edit"
+      ? "✏️ Edit Website Shop Product"
+      : "➕ New Website Shop Product";
+
+  const prompt =
+    mode === "edit"
+      ? `Current title:\n${product?.title || "Untitled"}\n\nEnter the new title.`
+      : "Enter the product title.";
+
+  return safeEdit(
+    chatId,
+    messageId,
+    `${heading}\n\n${prompt}`,
+    { inline_keyboard: [[btn("❌ Cancel", "website_shop_cancel")]] }
+  );
+}
+
 
 async function showCampaignMenu(chatId, messageId) {
   const campaigns = await getCampaigns();
@@ -738,135 +853,6 @@ async function sendEmail(to, subject, text) {
   }
 }
 
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-async function getTelegramFileLinkWithRetry(fileId, attempts = 4) {
-  let lastError;
-
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    try {
-      return await bot.getFileLink(fileId);
-    } catch (e) {
-      lastError = e;
-      if (attempt < attempts) {
-        await sleep(attempt * 1200);
-      }
-    }
-  }
-
-  throw new Error(
-    `Telegram could not prepare the image download after ${attempts} attempts: ${lastError?.message || "connection reset"}`
-  );
-}
-
-function downloadBinary(url, attempts = 4) {
-  return new Promise((resolve, reject) => {
-    const run = attempt => {
-      const req = https.get(
-        url,
-        {
-          headers: {
-            "User-Agent": "Jabari-Promoter/1.0",
-            "Connection": "close"
-          },
-          agent: false
-        },
-        res => {
-          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-            res.resume();
-            return downloadBinary(res.headers.location, attempts)
-              .then(resolve)
-              .catch(reject);
-          }
-
-          if (res.statusCode !== 200) {
-            res.resume();
-
-            if (attempt < attempts) {
-              return setTimeout(() => run(attempt + 1), attempt * 1200);
-            }
-
-            return reject(
-              new Error(`Telegram image download failed (HTTP ${res.statusCode}).`)
-            );
-          }
-
-          const chunks = [];
-          let total = 0;
-          let finished = false;
-
-          const fail = error => {
-            if (finished) return;
-            finished = true;
-
-            if (attempt < attempts) {
-              return setTimeout(() => run(attempt + 1), attempt * 1200);
-            }
-
-            reject(error);
-          };
-
-          res.on("data", chunk => {
-            total += chunk.length;
-
-            if (total > 8 * 1024 * 1024) {
-              req.destroy();
-              return fail(
-                new Error("Image is too large. Please send a smaller image.")
-              );
-            }
-
-            chunks.push(chunk);
-          });
-
-          res.on("end", () => {
-            if (finished) return;
-            finished = true;
-            resolve(Buffer.concat(chunks));
-          });
-
-          res.on("error", fail);
-        }
-      );
-
-      req.setTimeout(30000, () => {
-        req.destroy(new Error("Telegram image download timed out."));
-      });
-
-      req.on("error", error => {
-        if (attempt < attempts) {
-          return setTimeout(() => run(attempt + 1), attempt * 1200);
-        }
-        reject(error);
-      });
-    };
-
-    run(1);
-  });
-}
-
-async function showWebsiteBlogPreview(chatId, state) {
-  const preview =
-    `📝 ${state.type === "website_blog_edit" ? "Edit" : "New"} Website Blog Post\n\n` +
-    `Title:\n${state.title}\n\n` +
-    `Content:\n${state.content.slice(0, 3000)}${state.content.length > 3000 ? "…" : ""}\n\n` +
-    `Image: ${state.image ? "Attached ✅" : "None"}\n\n` +
-    `Save this post to the Jabari website?`;
-
-  return bot.sendMessage(chatId, preview, {
-    reply_markup: {
-      inline_keyboard: [
-        [btn("✅ Save to Website", "website_blog_save")],
-        [btn("🔄 Start Again", "website_blog_restart")],
-        [btn("❌ Cancel", "website_blog_cancel")]
-      ]
-    }
-  });
-}
-
 // ----- Commands: kept as backups. Normal navigation uses buttons. -----
 bot.onText(/^\/start$/, async msg => {
   if (!isOwner(msg)) return deny(msg.chat.id);
@@ -896,8 +882,7 @@ bot.onText(/^\/testemail(?:\s+(.+))?$/i, async (msg, match) => {
 
 // ----- Text input flow -----
 bot.on("message", async msg => {
-  if (!isOwner(msg) || !inputState || inputState.chatId !== msg.chat.id) return;
-  if (!msg.text && !msg.photo) return;
+  if (!isOwner(msg) || !msg.text || msg.text.startsWith("/") || !inputState || inputState.chatId !== msg.chat.id) return;
   const s = inputState;
   try {
     if (s.type === "scan_website") {
@@ -936,77 +921,95 @@ bot.on("message", async msg => {
 
     if (s.type === "website_blog_create" || s.type === "website_blog_edit") {
       if (s.step === "title") {
-        if (!msg.text || msg.text.startsWith("/")) {
-          return bot.sendMessage(msg.chat.id, "Please enter a blog post title.");
-        }
-
         const title = msg.text.trim();
         if (!title) return bot.sendMessage(msg.chat.id, "Please enter a blog post title.");
-
         s.title = title;
         s.step = "content";
-
-        return bot.sendMessage(
-          msg.chat.id,
-          "Now send the blog post content.\n\nYou can use multiple paragraphs."
-        );
+        return bot.sendMessage(msg.chat.id, "Now send the blog post content.\n\nYou can use multiple paragraphs.");
       }
 
       if (s.step === "content") {
-        if (!msg.text || msg.text.startsWith("/")) {
-          return bot.sendMessage(msg.chat.id, "Please send the blog post content.");
-        }
-
         const content = msg.text;
-        if (!content.trim()) {
-          return bot.sendMessage(msg.chat.id, "Please enter the blog post content.");
-        }
-
+        if (!content.trim()) return bot.sendMessage(msg.chat.id, "Please enter the blog post content.");
         s.content = content;
-        s.step = "image";
-
-        return bot.sendMessage(
-          msg.chat.id,
-          s.image
-            ? "🖼️ Send a new image for this post, or send /skip to keep the current image."
-            : "🖼️ Send an image for this post, or send /skip to continue without an image."
-        );
-      }
-
-      if (s.step === "image") {
-        if (msg.text && msg.text.trim().toLowerCase() === "/skip") {
-          return showWebsiteBlogPreview(msg.chat.id, s);
-        }
-
-        if (!msg.photo || !msg.photo.length) {
-          return bot.sendMessage(
-            msg.chat.id,
-            "Please send an image, or send /skip to continue without an image."
-          );
-        }
-
-        try {
-          // Telegram sends several photo sizes. Use the largest available one.
-          const photo = msg.photo[msg.photo.length - 1];
-
-          const fileUrl = await getTelegramFileLinkWithRetry(photo.file_id);
-          const imageBuffer = await downloadBinary(fileUrl);
-
-          s.image = await websiteBlog.uploadImage(
-            imageBuffer,
-            "telegram-image.jpg"
-          );
-
-          return showWebsiteBlogPreview(msg.chat.id, s);
-        } catch (e) {
-          console.error("Website blog image upload error:", e.message);
-          return bot.sendMessage(
-            msg.chat.id,
-            `❌ Image upload failed.\n\n${e.message}\n\nPlease try sending the image again.`
-          );
-        }
+        const preview =
+          `📝 ${s.type === "website_blog_edit" ? "Edit" : "New"} Website Blog Post\n\n` +
+          `Title:\n${s.title}\n\n` +
+          `Content:\n${s.content.slice(0, 3000)}${s.content.length > 3000 ? "…" : ""}\n\n` +
+          `Save this post to the Jabari website?`;
+        return bot.sendMessage(msg.chat.id, preview, {
+          reply_markup: {
+            inline_keyboard: [
+              [btn("✅ Save to Website", "website_blog_save")],
+              [btn("🔄 Start Again", "website_blog_restart")],
+              [btn("❌ Cancel", "website_blog_cancel")]
+            ]
+          }
+        });
       }
     }
+
+if (s.type === "website_shop_create" || s.type === "website_shop_edit") {
+  if (s.step === "title") {
+    if (!msg.text.trim()) {
+      return bot.sendMessage(msg.chat.id, "Please enter a product title.");
+    }
+
+    s.title = msg.text.trim();
+    s.step = "desc";
+
+    return bot.sendMessage(
+      msg.chat.id,
+      "Enter the product description."
+    );
+  }
+
+  if (s.step === "desc") {
+    if (!msg.text.trim()) {
+      return bot.sendMessage(msg.chat.id, "Please enter a product description.");
+    }
+
+    s.desc = msg.text.trim();
+    s.step = "price";
+
+    return bot.sendMessage(
+      msg.chat.id,
+      "Enter the price in Nigerian Naira. Example: 1500"
+    );
+  }
+
+  if (s.step === "price") {
+    const price = Number(msg.text.replace(/[^0-9.]/g, ""));
+
+    if (!Number.isFinite(price) || price <= 0) {
+      return bot.sendMessage(
+        msg.chat.id,
+        "Please enter a valid price in Naira."
+      );
+    }
+
+    s.priceNaira = price;
+    s.step = "pdf";
+
+    return bot.sendMessage(
+      msg.chat.id,
+      s.type === "website_shop_edit"
+        ? "📄 Send a replacement PDF, or tap Keep Current PDF."
+        : "📄 Send the product PDF.",
+      {
+        reply_markup: {
+          inline_keyboard:
+            s.type === "website_shop_edit"
+              ? [
+                  [btn("📄 Keep Current PDF", "website_shop_keep_pdf")],
+                  [btn("❌ Cancel", "website_shop_cancel")]
+                ]
+              : [[btn("❌ Cancel", "website_shop_cancel")]]
+        }
+      }
+    );
+  }
+}
 
     if (s.type === "campaign_create" || s.type === "campaign_edit") {
       if (s.step === "title") {
@@ -1056,6 +1059,113 @@ bot.on("callback_query", async q => {
     if (data === "menu_main") { inputState = null; return showMain(chatId, messageId); }
     if (data === "menu_campaigns") return showCampaignMenu(chatId, messageId);
     if (data === "menu_website_blog") return showWebsiteBlogMenu(chatId, messageId);
+    if (data === "menu_website_shop") return showWebsiteShopMenu(chatId, messageId);
+    
+    if (data === "website_shop_list") return showWebsiteShopList(chatId, messageId);
+    
+    if (data === "website_shop_create") {
+      return startWebsiteShopWizard(chatId, messageId, "create");
+    }
+    
+    if (data === "website_shop_cancel") {
+      inputState = null;
+      return showWebsiteShopMenu(chatId, messageId);
+    }
+    
+    if (data === "website_shop_keep_pdf") {
+      if (
+        !inputState ||
+        inputState.chatId !== chatId ||
+        !["website_shop_create", "website_shop_edit"].includes(inputState.type)
+      ) {
+        return showWebsiteShopMenu(chatId, messageId);
+      }
+    
+      if (inputState.type === "website_shop_create") {
+        return bot.sendMessage(chatId, "A new product requires a PDF. Please send the PDF.");
+      }
+    
+      const s = inputState;
+    
+      const p = await websiteShop.saveProduct({
+        slug: s.slug,
+        title: s.title,
+        desc: s.desc,
+        priceNaira: s.priceNaira,
+        file: s.file,
+        active: true
+      });
+    
+      inputState = null;
+    
+      return safeEdit(
+        chatId,
+        messageId,
+        `✅ Product updated.\n\n${p.title}`,
+        {
+          inline_keyboard: [
+            [btn("📋 View Products", "website_shop_list")],
+            [btn("🛍️ Website Shop", "menu_website_shop")],
+            [btn("🏠 Main Menu", "menu_main")]
+          ]
+        }
+      );
+    }
+    
+    if (data.startsWith("website_shop_view:")) {
+      return showWebsiteShopDetails(
+        chatId,
+        messageId,
+        data.slice("website_shop_view:".length)
+      );
+    }
+    
+    if (data.startsWith("website_shop_edit:")) {
+      const slug = data.slice("website_shop_edit:".length);
+      const products = await websiteShop.listProducts();
+      const p = products.find(x => x.slug === slug);
+    
+      if (!p) throw new Error("Shop product not found.");
+    
+      return startWebsiteShopWizard(chatId, messageId, "edit", p);
+    }
+    
+    if (data.startsWith("website_shop_toggle:")) {
+      const slug = data.slice("website_shop_toggle:".length);
+    
+      await websiteShop.toggleProduct(slug);
+    
+      return showWebsiteShopDetails(chatId, messageId, slug);
+    }
+    
+    if (data.startsWith("website_shop_delete:")) {
+      const slug = data.slice("website_shop_delete:".length);
+      const products = await websiteShop.listProducts();
+      const p = products.find(x => x.slug === slug);
+    
+      if (!p) throw new Error("Shop product not found.");
+    
+      return safeEdit(
+        chatId,
+        messageId,
+        `🗑️ Delete Shop Product\n\n${p.title}\n\nAre you sure?`,
+        {
+          inline_keyboard: [
+            [btn("🗑️ Yes, Delete", `website_shop_delete_yes:${slug}`)],
+            [btn("⬅️ Keep It", `website_shop_view:${slug}`)]
+          ]
+        }
+      );
+    }
+    
+    if (data.startsWith("website_shop_delete_yes:")) {
+      await websiteShop.deleteProduct(
+        data.slice("website_shop_delete_yes:".length)
+      );
+    
+      return showWebsiteShopList(chatId, messageId);
+    }
+    
     if (data === "website_blog_create") {
       return startWebsiteBlogWizard(chatId, messageId, "create");
     }
@@ -1232,6 +1342,81 @@ bot.on("callback_query", async q => {
   } catch (e) {
     console.error("Callback error:", e.message);
     await bot.sendMessage(chatId, `Action failed.\n\n${e.message}`);
+  }
+});
+
+bot.on("document", async msg => {
+  if (!isOwner(msg) || !inputState || inputState.chatId !== msg.chat.id) {
+    return;
+  }
+
+  const s = inputState;
+
+  if (
+    !["website_shop_create", "website_shop_edit"].includes(s.type) ||
+    s.step !== "pdf"
+  ) {
+    return;
+  }
+
+  const doc = msg.document;
+
+  if (!doc) return;
+
+  if (
+    String(doc.file_name || "").toLowerCase().slice(-4) !== ".pdf" ||
+    String(doc.mime_type || "").toLowerCase() !== "application/pdf"
+  ) {
+    return bot.sendMessage(msg.chat.id, "❌ Please send a PDF file.");
+  }
+
+  try {
+    await bot.sendMessage(
+      msg.chat.id,
+      "⏳ Uploading the PDF to the Jabari website…"
+    );
+
+    const fileUrl = await getTelegramFileLinkWithRetry(doc.file_id);
+    const buffer = await downloadBinary(fileUrl);
+
+    s.file = await websiteShop.uploadPdf(
+      buffer,
+      doc.file_name || "product.pdf"
+    );
+
+    const p = await websiteShop.saveProduct({
+      slug: s.slug,
+      title: s.title,
+      desc: s.desc,
+      priceNaira: s.priceNaira,
+      file: s.file,
+      active: true
+    });
+
+    inputState = null;
+
+    return bot.sendMessage(
+      msg.chat.id,
+      `✅ Shop product ${s.type === "website_shop_edit" ? "updated" : "created"}.\n\n` +
+      `${p.title}\n₦${Number(p.priceNaira).toLocaleString()}\n\n` +
+      `The same shop/products.json used by the website has been updated.`,
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [btn("📋 View Products", "website_shop_list")],
+            [btn("🛍️ Website Shop", "menu_website_shop")],
+            [btn("🏠 Main Menu", "menu_main")]
+          ]
+        }
+      }
+    );
+  } catch (e) {
+    console.error("Website shop PDF upload error:", e.message);
+
+    return bot.sendMessage(
+      msg.chat.id,
+      `❌ PDF upload failed.\n\n${e.message}`
+    );
   }
 });
 
