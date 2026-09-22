@@ -1,6 +1,7 @@
 require("dotenv").config();
 
 const http = require("http");
+const https = require("https");
 const crypto = require("crypto");
 const dns = require("dns").promises;
 const TelegramBot = require("node-telegram-bot-api");
@@ -738,33 +739,112 @@ async function sendEmail(to, subject, text) {
 }
 
 
-function downloadBinary(url) {
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function getTelegramFileLinkWithRetry(fileId, attempts = 4) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await bot.getFileLink(fileId);
+    } catch (e) {
+      lastError = e;
+      if (attempt < attempts) {
+        await sleep(attempt * 1200);
+      }
+    }
+  }
+
+  throw new Error(
+    `Telegram could not prepare the image download after ${attempts} attempts: ${lastError?.message || "connection reset"}`
+  );
+}
+
+function downloadBinary(url, attempts = 4) {
   return new Promise((resolve, reject) => {
-    https.get(url, res => {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        res.resume();
-        return downloadBinary(res.headers.location).then(resolve).catch(reject);
-      }
-      if (res.statusCode !== 200) {
-        res.resume();
-        return reject(new Error(`Telegram file download failed (HTTP ${res.statusCode}).`));
-      }
+    const run = attempt => {
+      const req = https.get(
+        url,
+        {
+          headers: {
+            "User-Agent": "Jabari-Promoter/1.0",
+            "Connection": "close"
+          },
+          agent: false
+        },
+        res => {
+          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+            res.resume();
+            return downloadBinary(res.headers.location, attempts)
+              .then(resolve)
+              .catch(reject);
+          }
 
-      const chunks = [];
-      let total = 0;
+          if (res.statusCode !== 200) {
+            res.resume();
 
-      res.on("data", chunk => {
-        total += chunk.length;
-        if (total > 8 * 1024 * 1024) {
-          res.destroy();
-          return reject(new Error("Image is too large. Please send a smaller image."));
+            if (attempt < attempts) {
+              return setTimeout(() => run(attempt + 1), attempt * 1200);
+            }
+
+            return reject(
+              new Error(`Telegram image download failed (HTTP ${res.statusCode}).`)
+            );
+          }
+
+          const chunks = [];
+          let total = 0;
+          let finished = false;
+
+          const fail = error => {
+            if (finished) return;
+            finished = true;
+
+            if (attempt < attempts) {
+              return setTimeout(() => run(attempt + 1), attempt * 1200);
+            }
+
+            reject(error);
+          };
+
+          res.on("data", chunk => {
+            total += chunk.length;
+
+            if (total > 8 * 1024 * 1024) {
+              req.destroy();
+              return fail(
+                new Error("Image is too large. Please send a smaller image.")
+              );
+            }
+
+            chunks.push(chunk);
+          });
+
+          res.on("end", () => {
+            if (finished) return;
+            finished = true;
+            resolve(Buffer.concat(chunks));
+          });
+
+          res.on("error", fail);
         }
-        chunks.push(chunk);
+      );
+
+      req.setTimeout(30000, () => {
+        req.destroy(new Error("Telegram image download timed out."));
       });
 
-      res.on("end", () => resolve(Buffer.concat(chunks)));
-      res.on("error", reject);
-    }).on("error", reject);
+      req.on("error", error => {
+        if (attempt < attempts) {
+          return setTimeout(() => run(attempt + 1), attempt * 1200);
+        }
+        reject(error);
+      });
+    };
+
+    run(1);
   });
 }
 
@@ -909,7 +989,7 @@ bot.on("message", async msg => {
           // Telegram sends several photo sizes. Use the largest available one.
           const photo = msg.photo[msg.photo.length - 1];
 
-          const fileUrl = await bot.getFileLink(photo.file_id);
+          const fileUrl = await getTelegramFileLinkWithRetry(photo.file_id);
           const imageBuffer = await downloadBinary(fileUrl);
 
           s.image = await websiteBlog.uploadImage(
@@ -922,7 +1002,7 @@ bot.on("message", async msg => {
           console.error("Website blog image upload error:", e.message);
           return bot.sendMessage(
             msg.chat.id,
-            `❌ Image upload failed.\n\n${e.message}`
+            `❌ Image upload failed.\n\n${e.message}\n\nPlease try sending the image again.`
           );
         }
       }
