@@ -1,299 +1,355 @@
-const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
+const websiteBlog = require('./lib/website/blog');
 
-const supabase = createClient(
-  process.env.PROMOTER_SUPABASE_URL || '',
-  process.env.PROMOTER_SUPABASE_SERVICE_ROLE_KEY || ''
-);
+const supabaseUrl = process.env.PROMOTER_SUPABASE_URL || '';
+const supabaseKey = process.env.PROMOTER_SUPABASE_SERVICE_ROLE_KEY || '';
+const siteUrl = String(process.env.JABARI_SITE_URL || '').replace(/\/$/, '');
 
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
-const GITHUB_OWNER = process.env.GITHUB_OWNER || 'jabarixai-dev';
-const GITHUB_REPO = process.env.GITHUB_REPO || 'Jabari';
-const GITHUB_BRANCH = process.env.GITHUB_BRANCH || 'main';
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
-const SITE_URL = (process.env.JABARI_SITE_URL || 'https://jabarixai-dev.netlify.app').replace(/\/$/, '');
+if (!supabaseUrl || !supabaseKey) {
+  throw new Error('Missing PROMOTER_SUPABASE_URL or PROMOTER_SUPABASE_SERVICE_ROLE_KEY.');
+}
 
-const SETTINGS_ID = 1;
+const supabase = createClient(supabaseUrl, supabaseKey);
 let promotionHandler = null;
-function setPromotionHandler(fn){ promotionHandler = typeof fn === 'function' ? fn : null; }
-const sleep = ms => new Promise(r => setTimeout(r, ms));
+let schedulerStarted = false;
+let schedulerBusy = false;
 
-function fingerprint(value) {
-  return crypto.createHash('sha256').update(String(value || '').trim().toLowerCase()).digest('hex');
-}
+const NEWS_FEEDS = [
+  'https://news.google.com/rss/search?q=Web3+blockchain+crypto&hl=en-US&gl=US&ceid=US:en',
+  'https://news.google.com/rss/search?q=DeFi+crypto+Web3&hl=en-US&gl=US&ceid=US:en'
+];
 
-function slugify(value) {
-  return String(value || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 100) || `article-${Date.now()}`;
-}
+const OPPORTUNITY_FEEDS = [
+  'https://news.google.com/rss/search?q=Web3+bounty+OR+crypto+bounty&hl=en-US&gl=US&ceid=US:en',
+  'https://news.google.com/rss/search?q=Web3+alpha+OR+crypto+airdrop+opportunity&hl=en-US&gl=US&ceid=US:en',
+  'https://news.google.com/rss/search?q=Web3+quest+reward+OR+blockchain+hackathon+bounty&hl=en-US&gl=US&ceid=US:en',
+  'https://news.google.com/rss/search?q=Web3+earn+opportunity+OR+crypto+grant&hl=en-US&gl=US&ceid=US:en'
+];
+
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
 function cleanText(value) {
   return String(value || '')
-    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
-    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim();
+    .replace(/<!\[CDATA\[|\]\]>/g, '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-async function githubRequest(path, options = {}) {
-  if (!GITHUB_TOKEN) throw new Error('GITHUB_TOKEN is missing.');
-  const response = await fetch(`https://api.github.com${path}`, {
-    ...options,
-    headers: {
-      Accept: 'application/vnd.github+json',
-      Authorization: `Bearer ${GITHUB_TOKEN}`,
-      'X-GitHub-Api-Version': '2022-11-28',
-      ...(options.headers || {})
+function xmlTag(item, tag) {
+  const re = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`, 'i');
+  return cleanText(item.match(re)?.[1] || '');
+}
+
+function parseRss(xml) {
+  const items = [];
+  const blocks = xml.match(/<item[\s\S]*?<\/item>/gi) || [];
+  for (const block of blocks) {
+    const title = xmlTag(block, 'title');
+    const link = xmlTag(block, 'link');
+    const description = xmlTag(block, 'description');
+    const pubDate = xmlTag(block, 'pubDate');
+    const source = xmlTag(block, 'source');
+    if (title && link) items.push({ title, link, description, pubDate, source });
+  }
+  return items;
+}
+
+async function fetchText(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12000);
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: { 'User-Agent': 'JabariPromoter/1.0 Web3Research' }
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.text();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchFeeds(feeds) {
+  const all = [];
+  for (const feed of feeds) {
+    try {
+      const xml = await fetchText(feed);
+      all.push(...parseRss(xml));
+    } catch (e) {
+      console.error('Web3 feed failed:', feed, e.message);
     }
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data?.message || `GitHub HTTP ${response.status}`);
-  return data;
-}
-
-async function readPosts() {
-  const path = `/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/blog/posts.json?ref=${encodeURIComponent(GITHUB_BRANCH)}`;
-  const data = await githubRequest(path);
-  const raw = Buffer.from(data.content || '', 'base64').toString('utf8');
-  return { posts: Array.isArray(JSON.parse(raw)) ? JSON.parse(raw) : [], sha: data.sha };
-}
-
-async function writePosts(posts, sha, message) {
-  const path = `/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/blog/posts.json`;
-  return githubRequest(path, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      message,
-      content: Buffer.from(JSON.stringify(posts, null, 2) + '\n').toString('base64'),
-      branch: GITHUB_BRANCH,
-      sha
-    })
+  }
+  const seen = new Set();
+  return all.filter(item => {
+    const key = `${item.title.toLowerCase()}|${item.link}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
   });
 }
 
-async function createBlogPost({ title, content, type, image = '' }) {
-  const { posts, sha } = await readPosts();
-  const id = `auto-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
-  const slug = `${slugify(title)}-${id.slice(-6)}`;
-  const now = new Date().toISOString();
-  const post = {
-    id,
-    slug,
-    title,
-    content,
-    image,
-    video: '',
-    date: now.slice(0, 10),
-    updatedAt: now,
-    category: type,
-    articleType: type
-  };
-  posts.unshift(post);
-  await writePosts(posts, sha, `Add automated ${type} article: ${title}`);
-  return { ...post, url: `${SITE_URL}/#blog/${encodeURIComponent(slug)}` };
+function classifyOpportunity(item) {
+  const text = `${item.title} ${item.description}`.toLowerCase();
+  if (/bounty|hackathon|bug bounty/.test(text)) return 'bounty';
+  if (/alpha|airdrop|early access|testnet|quest|campaign|points/.test(text)) return 'alpha';
+  if (/grant|earn|reward|funding|opportunity|income/.test(text)) return 'money_making';
+  return null;
+}
+
+function looksUsefulOpportunity(item) {
+  const text = `${item.title} ${item.description}`.toLowerCase();
+  const bad = [
+    'casino', 'gambling', 'sportsbook', 'porn', 'adult', 'phishing',
+    'malware', 'ransomware', 'steal your', 'guaranteed profit', '100% profit'
+  ];
+  return !bad.some(term => text.includes(term)) && item.link.startsWith('http');
+}
+
+function fingerprint(item, type) {
+  const normalized = `${type}|${item.title}|${item.link}`.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  return require('crypto').createHash('sha256').update(normalized).digest('hex');
+}
+
+function articleUrl(id) {
+  return siteUrl ? `${siteUrl}/#blog/${encodeURIComponent(id)}` : '';
 }
 
 async function getSettings() {
-  const { data, error } = await supabase.from('promoter_automation_settings').select('*').eq('id', SETTINGS_ID).single();
+  const { data, error } = await supabase.from('promoter_automation_settings').select('*').eq('id', 1).single();
   if (error) throw error;
   return data;
 }
 
 async function saveSettings(patch) {
-  const { data, error } = await supabase.from('promoter_automation_settings').update({ ...patch, updated_at: new Date().toISOString() }).eq('id', SETTINGS_ID).select('*').single();
+  const { data, error } = await supabase
+    .from('promoter_automation_settings')
+    .update({ ...patch, updated_at: new Date().toISOString() })
+    .eq('id', 1)
+    .select('*')
+    .single();
   if (error) throw error;
   return data;
 }
 
-async function rssSearch(query, limit = 10) {
-  const url = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-US&gl=US&ceid=US:en`;
-  const response = await fetch(url, { headers: { 'User-Agent': 'JabariPromoter/1.0' } });
-  if (!response.ok) throw new Error(`Search HTTP ${response.status}`);
-  const xml = await response.text();
-  return [...xml.matchAll(/<item>([\s\S]*?)<\/item>/gi)].slice(0, limit).map(m => {
-    const item = m[1];
-    return {
-      title: cleanText(item.match(/<title>([\s\S]*?)<\/title>/i)?.[1]),
-      url: cleanText(item.match(/<link>([\s\S]*?)<\/link>/i)?.[1]),
-      publisher: cleanText(item.match(/<source[^>]*>([\s\S]*?)<\/source>/i)?.[1]),
-      published_at: cleanText(item.match(/<pubDate>([\s\S]*?)<\/pubDate>/i)?.[1])
-    };
-  }).filter(x => x.title && x.url);
+async function logRun(runType, status, patch = {}) {
+  const payload = { run_type: runType, status, ...patch };
+  const { data, error } = await supabase.from('promoter_automation_runs').insert(payload).select('*').single();
+  if (error) console.error('Automation run log failed:', error.message);
+  return data;
 }
 
-async function geminiJson(prompt) {
-  if (!GEMINI_API_KEY) throw new Error('GEMINI_API_KEY is missing.');
-  const models = [...new Set([GEMINI_MODEL, 'gemini-3.7-flash', 'gemini-2.5-flash'])];
-  let last;
-  for (const model of models) {
-    try {
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { responseMimeType: 'application/json', maxOutputTokens: 5000 }
-        })
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data?.error?.message || `Gemini HTTP ${response.status}`);
-      const raw = data?.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('').trim();
-      if (!raw) throw new Error('Gemini returned an empty response.');
-      return JSON.parse(raw);
-    } catch (e) {
-      last = e;
-      await sleep(800);
-    }
-  }
-  throw last || new Error('Gemini generation failed.');
-}
-
-async function startRun(runType) {
-  const { data, error } = await supabase.from('promoter_automation_runs').insert({ run_type: runType, status: 'started' }).select('id').single();
-  if (error) throw error;
-  return data.id;
-}
-
-async function finishRun(id, patch) {
-  await supabase.from('promoter_automation_runs').update({ ...patch, completed_at: new Date().toISOString() }).eq('id', id);
+async function updateRun(id, patch) {
+  if (!id) return;
+  const { error } = await supabase.from('promoter_automation_runs').update(patch).eq('id', id);
+  if (error) console.error('Automation run update failed:', error.message);
 }
 
 async function discoverOpportunities() {
-  const runId = await startRun('opportunity_discovery');
+  const run = await logRun('opportunity_discovery', 'started', { started_at: new Date().toISOString() });
   try {
-    const queries = [
-      'Web3 alpha opportunities 2026 crypto testnet rewards',
-      'Web3 bounty hackathon grant rewards 2026',
-      'crypto Web3 earn opportunity campaign rewards 2026',
-      'blockchain protocol points testnet incentive campaign 2026'
-    ];
-    const rows = [];
-    for (const q of queries) {
-      try { rows.push(...await rssSearch(q, 8)); } catch (e) { console.error('Opportunity search:', e.message); }
-    }
-    const unique = new Map();
-    for (const row of rows) unique.set(fingerprint(row.url.replace(/[?#].*$/, '')), row);
-
+    const items = await fetchFeeds(OPPORTUNITY_FEEDS);
     let stored = 0;
-    for (const row of unique.values()) {
-      let type = 'money_making';
-      const text = `${row.title} ${row.publisher}`.toLowerCase();
-      if (/bounty|hackathon|grant/.test(text)) type = 'bounty';
-      else if (/alpha|points|testnet|incentive|campaign/.test(text)) type = 'alpha';
-      const { error } = await supabase.from('promoter_opportunities').upsert({
+    const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
+
+    for (const item of items) {
+      const type = classifyOpportunity(item);
+      if (!type || !looksUsefulOpportunity(item)) continue;
+      const publishedTime = Date.parse(item.pubDate || '') || Date.now();
+      if (publishedTime < cutoff) continue;
+
+      const fp = fingerprint(item, type);
+      const row = {
         opportunity_type: type,
-        title: row.title.slice(0, 500),
-        summary: `${row.publisher || 'Source'} — ${row.published_at || ''}`.trim(),
-        source_url: row.url,
-        source_name: row.publisher || null,
-        fingerprint: fingerprint(row.url.replace(/[?#].*$/, '')),
-        status: 'discovered',
-        updated_at: new Date().toISOString()
-      }, { onConflict: 'fingerprint', ignoreDuplicates: true });
+        title: item.title.slice(0, 300),
+        summary: item.description.slice(0, 1200),
+        content: `Source: ${item.source || 'Web3 source'}\n\n${item.description || item.title}`,
+        source_url: item.link,
+        source_name: item.source || 'Web3 source',
+        discovered_at: new Date().toISOString(),
+        fingerprint: fp,
+        status: 'verified'
+      };
+
+      const { error } = await supabase.from('promoter_opportunities').insert(row);
       if (!error) stored++;
+      else if (error.code !== '23505') console.error('Opportunity store failed:', error.message);
     }
-    await finishRun(runId, { status: 'completed', items_found: unique.size, items_published: 0, message: `Stored ${stored} new opportunity candidates.` });
-    return { found: unique.size, stored };
+
+    await updateRun(run?.id, {
+      status: 'completed', completed_at: new Date().toISOString(),
+      items_found: items.length, items_published: 0, items_promoted: 0,
+      message: `Stored ${stored} new opportunities.`
+    });
+    return { found: items.length, stored };
   } catch (e) {
-    await finishRun(runId, { status: 'failed', message: e.message });
+    await updateRun(run?.id, { status: 'failed', completed_at: new Date().toISOString(), message: e.message });
     throw e;
   }
 }
 
-async function publishOpportunitySlot(slotLabel) {
-  const settings = await getSettings();
-  if (!settings.enabled || !settings.opportunities_enabled) return { skipped: true, reason: 'Opportunities disabled' };
+function buildNewsArticle(items) {
+  const selected = items.slice(0, 8);
+  const date = new Date().toLocaleDateString('en-US', { dateStyle: 'long' });
+  const body = [
+    `<p>Here is a concise Web3 news roundup for ${date}.</p>`,
+    ...selected.map((item, i) => `<h2>${i + 1}. ${escapeHtml(item.title)}</h2><p>${escapeHtml(item.description || 'Read the original report for details.')}</p><p><a href="${escapeHtml(item.link)}" target="_blank" rel="noopener">Read source</a></p>`),
+    '<p><strong>Note:</strong> This roundup summarizes public reports. Verify important details with the original sources before acting on them.</p>'
+  ];
+  return { title: `Web3 News Roundup — ${date}`, content: body.join('\n') };
+}
 
-  const runId = await startRun('opportunity_publish');
-  try {
-    const { data: candidates, error } = await supabase.from('promoter_opportunities')
-      .select('*').in('status', ['discovered','verified']).order('discovered_at', { ascending: true }).limit(8);
-    if (error) throw error;
-    if (!candidates?.length) {
-      await finishRun(runId, { status: 'skipped', message: `No stored opportunity for ${slotLabel}.` });
-      return { skipped: true, reason: 'No candidates' };
-    }
-
-    const chosen = candidates[0];
-    const research = candidates.slice(0, 5).map((x, i) => `${i + 1}. ${x.title}\nType: ${x.opportunity_type}\nSource: ${x.source_name || 'Unknown'}\nURL: ${x.source_url}`).join('\n\n');
-    const article = await geminiJson(`You write a high-quality Web3 opportunities article for Jabari.\n\nSelected opportunity:\n${chosen.title}\nType: ${chosen.opportunity_type}\nSource: ${chosen.source_name || 'Unknown'}\nURL: ${chosen.source_url}\n\nOther candidates for context:\n${research}\n\nReturn JSON with title, content, summary. Content must be HTML using h2, p, ul and li. Do not invent eligibility, reward amounts, deadlines or steps. If a detail is not supported by the supplied source information, say that readers should verify it on the original source. Make the article useful and transparent. Do not include a Sources section.`);
-    const post = await createBlogPost({ title: article.title || chosen.title, content: article.content, type: chosen.opportunity_type });
-    await supabase.from('promoter_opportunities').update({ status: 'published', article_id: post.id, article_url: post.url, published_at: new Date().toISOString(), content: article.content, summary: article.summary || chosen.summary, updated_at: new Date().toISOString() }).eq('id', chosen.id);
-    let promotion = null;
-    if (settings.promotion_enabled && promotionHandler) {
-      try { promotion = await promotionHandler({ title: post.title, description: article.summary || chosen.summary || '', url: post.url, opportunityId: chosen.id });
-        if (promotion?.sent > 0) await supabase.from('promoter_opportunities').update({ status: 'promoted', promoted_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq('id', chosen.id);
-      } catch (e) { console.error(`Opportunity promotion (${slotLabel}) failed:`, e.message); }
-    }
-    await finishRun(runId, { status: 'completed', items_found: 1, items_published: 1, items_promoted: promotion?.sent || 0, message: `${slotLabel}: ${post.url}` });
-    return { post, opportunity: chosen, promotion };
-  } catch (e) {
-    await finishRun(runId, { status: 'failed', message: e.message });
-    throw e;
-  }
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 async function publishNews() {
   const settings = await getSettings();
-  if (!settings.enabled || !settings.news_enabled) return { skipped: true, reason: 'News disabled' };
-  const runId = await startRun('news_publish');
+  if (!settings.enabled || !settings.news_enabled) return { skipped: true, reason: 'News automation is OFF.' };
+  const run = await logRun('news_publish', 'started', { started_at: new Date().toISOString() });
   try {
-    const queries = ['Web3 blockchain crypto news latest 2026', 'Ethereum Solana Bitcoin Web3 protocol news latest', 'AI agents Web3 blockchain news latest'];
-    const rows = [];
-    for (const q of queries) { try { rows.push(...await rssSearch(q, 8)); } catch (e) { console.error('News search:', e.message); } }
-    const unique = [...new Map(rows.map(x => [fingerprint(x.url.replace(/[?#].*$/, '')), x])).values()].slice(0, 12);
-    if (!unique.length) throw new Error('No Web3 news sources found.');
-    const research = unique.map((x,i) => `${i+1}. ${x.title}\nPublisher: ${x.publisher || 'Unknown'}\nURL: ${x.url}\nPublished: ${x.published_at || 'Unknown'}`).join('\n\n');
-    const article = await geminiJson(`You are the editor of a Web3 news blog. Compile one useful, factual news roundup from the supplied current headlines.\n\n${research}\n\nReturn JSON with title, content, summary. Content must be HTML using h2, p, ul and li. Do not invent facts, quotes, statistics or events. Do not add citation markers or a Sources section. Clearly distinguish analysis from reported facts.`);
-    const post = await createBlogPost({ title: article.title, content: article.content, type: 'news' });
-    await finishRun(runId, { status: 'completed', items_found: unique.length, items_published: 1, message: `News published: ${post.url}` });
-    return { post };
+    const items = await fetchFeeds(NEWS_FEEDS);
+    if (!items.length) throw new Error('No current Web3 news items were found.');
+    const article = buildNewsArticle(items);
+    const post = await websiteBlog.createPost(article);
+    const url = articleUrl(post.id);
+    await updateRun(run?.id, { status: 'completed', completed_at: new Date().toISOString(), items_found: items.length, items_published: 1, message: post.title });
+    await saveSettings({ last_news_run_at: new Date().toISOString() });
+    return { skipped: false, post: { ...post, url } };
   } catch (e) {
-    await finishRun(runId, { status: 'failed', message: e.message });
+    await updateRun(run?.id, { status: 'failed', completed_at: new Date().toISOString(), message: e.message });
     throw e;
   }
 }
 
-function startScheduler() {
-  let busy = false;
-  const tick = async () => {
-    if (busy) return;
-    busy = true;
+async function publishOpportunitySlot(slotName) {
+  const settings = await getSettings();
+  if (!settings.enabled || !settings.opportunities_enabled) return { skipped: true, reason: 'Opportunity automation is OFF.' };
+
+  const slot = String(slotName || 'Manual');
+  const now = new Date();
+  const slotKey = slot === 'Manual' ? `manual-${now.toISOString()}` : `${now.toISOString().slice(0,10)}-${slot}`;
+  if (slot !== 'Manual' && settings.last_opportunity_publish_slot === slotKey) {
+    return { skipped: true, reason: `${slot} slot has already been published today.` };
+  }
+
+  const { data: candidates, error } = await supabase
+    .from('promoter_opportunities')
+    .select('*')
+    .in('status', ['verified', 'discovered'])
+    .order('discovered_at', { ascending: false })
+    .limit(20);
+  if (error) throw error;
+  if (!candidates?.length) return { skipped: true, reason: 'No stored opportunity is available yet.' };
+
+  const chosen = candidates.find(x => !x.expires_at || new Date(x.expires_at) > now) || candidates[0];
+  const title = chosen.title;
+  const content = [
+    `<p>${escapeHtml(chosen.summary || chosen.content || '')}</p>`,
+    `<p><strong>Type:</strong> ${escapeHtml(chosen.opportunity_type)}</p>`,
+    `<p><strong>Source:</strong> ${escapeHtml(chosen.source_name || 'Public source')}</p>`,
+    `<p><a href="${escapeHtml(chosen.source_url)}" target="_blank" rel="noopener">View the original opportunity</a></p>`,
+    '<p><strong>Do your own verification:</strong> availability, eligibility, deadlines, rewards and requirements can change.</p>'
+  ].join('\n');
+
+  const post = await websiteBlog.createPost({ title, content });
+  const url = articleUrl(post.id);
+
+  await supabase.from('promoter_opportunities').update({
+    status: 'published', article_id: post.id, article_url: url, published_at: now.toISOString(), updated_at: now.toISOString()
+  }).eq('id', chosen.id);
+
+  if (slot !== 'Manual') await saveSettings({ last_opportunity_publish_slot: slotKey });
+
+  let promotion = null;
+  if (settings.promotion_enabled && promotionHandler && url) {
     try {
-      const settings = await getSettings();
-      if (!settings.enabled) return;
-      const now = Date.now();
-      const hour = new Date().getHours();
-      const lastOpportunity = settings.last_opportunity_scan_at ? new Date(settings.last_opportunity_scan_at).getTime() : 0;
-      const lastNews = settings.last_news_run_at ? new Date(settings.last_news_run_at).getTime() : 0;
-      if (settings.opportunities_enabled && (!lastOpportunity || now - lastOpportunity >= 55 * 60 * 1000)) {
-        try { await discoverOpportunities(); await saveSettings({ last_opportunity_scan_at: new Date().toISOString() }); } catch (e) { console.error('Hourly opportunity automation:', e.message); }
-      }
-      if (settings.news_enabled && (!lastNews || now - lastNews >= settings.news_interval_hours * 3600000)) {
-        try { await publishNews(); await saveSettings({ last_news_run_at: new Date().toISOString() }); } catch (e) { console.error('5-hour news automation:', e.message); }
-      }
-      const slots = [
-        [settings.morning_hour, 'Morning'],
-        [settings.afternoon_hour, 'Afternoon'],
-        [settings.night_hour, 'Night']
-      ];
-      const lastSlot = settings.last_opportunity_publish_slot || '';
-      const currentKey = `${new Date().toISOString().slice(0,10)}-${hour}`;
-      const slot = slots.find(([h]) => h === hour);
-      if (settings.opportunities_enabled && slot && lastSlot !== currentKey) {
-        try { await publishOpportunitySlot(slot[1]); await saveSettings({ last_opportunity_publish_slot: currentKey }); } catch (e) { console.error(`${slot[1]} opportunity automation:`, e.message); }
-      }
-    } finally { busy = false; }
-  };
-  void tick();
-  return setInterval(tick, 5 * 60 * 1000);
+      promotion = await promotionHandler({ title, description: chosen.summary || chosen.content || '', url });
+      await supabase.from('promoter_opportunities').update({ status: 'promoted', promoted_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq('id', chosen.id);
+    } catch (e) {
+      console.error('Opportunity promotion failed:', e.message);
+      promotion = { error: e.message };
+    }
+  }
+
+  await logRun('opportunity_publish', 'completed', { started_at: now.toISOString(), completed_at: new Date().toISOString(), items_found: 1, items_published: 1, items_promoted: promotion?.sent || 0, message: `${slot}: ${title}` });
+  return { skipped: false, post: { ...post, url }, promotion };
 }
 
 async function automationStatus() {
   const settings = await getSettings();
-  const { data: pending } = await supabase.from('promoter_opportunities').select('id', { count: 'exact', head: true }).in('status', ['discovered','verified']);
-  return { settings, pending: pending || 0 };
+  const { count, error } = await supabase.from('promoter_opportunities').select('*', { count: 'exact', head: true }).in('status', ['verified', 'discovered']);
+  if (error) throw error;
+  return { settings, pending: count || 0 };
 }
 
-module.exports = { startScheduler, discoverOpportunities, publishNews, publishOpportunitySlot, automationStatus, getSettings, saveSettings, setPromotionHandler };
+function setPromotionHandler(fn) { promotionHandler = typeof fn === 'function' ? fn : null; }
+
+function lagosSlot() {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Lagos', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit'
+  }).formatToParts(new Date());
+  const get = t => parts.find(x => x.type === t)?.value || '';
+  const hour = Number(get('hour'));
+  const minute = Number(get('minute'));
+  const date = `${get('year')}-${get('month')}-${get('day')}`;
+  if (hour === 9 && minute === 0) return { name: 'Morning', key: `${date}-Morning` };
+  if (hour === 15 && minute === 0) return { name: 'Afternoon', key: `${date}-Afternoon` };
+  if (hour === 21 && minute === 0) return { name: 'Night', key: `${date}-Night` };
+  return null;
+}
+
+async function schedulerTick() {
+  if (schedulerBusy) return;
+  schedulerBusy = true;
+  try {
+    const settings = await getSettings();
+    if (!settings.enabled) return;
+
+    const now = Date.now();
+    const lastScan = settings.last_opportunity_scan_at ? Date.parse(settings.last_opportunity_scan_at) : 0;
+    if (settings.hourly_discovery_enabled && (!lastScan || now - lastScan >= 60 * 60 * 1000)) {
+      try {
+        await discoverOpportunities();
+        await saveSettings({ last_opportunity_scan_at: new Date().toISOString() });
+      } catch (e) { console.error('Hourly opportunity scan failed:', e.message); }
+    }
+
+    const lastNews = settings.last_news_run_at ? Date.parse(settings.last_news_run_at) : 0;
+    if (settings.news_enabled && (!lastNews || now - lastNews >= Number(settings.news_interval_hours || 5) * 60 * 60 * 1000)) {
+      try { await publishNews(); } catch (e) { console.error('Scheduled news publish failed:', e.message); }
+    }
+
+    const slot = lagosSlot();
+    if (slot) {
+      try { await publishOpportunitySlot(slot.name); } catch (e) { console.error(`Scheduled ${slot.name} opportunity failed:`, e.message); }
+    }
+  } finally {
+    schedulerBusy = false;
+  }
+}
+
+function startScheduler() {
+  if (schedulerStarted) return;
+  schedulerStarted = true;
+  void schedulerTick();
+  setInterval(() => void schedulerTick(), 60 * 1000);
+}
+
+module.exports = {
+  getSettings,
+  saveSettings,
+  automationStatus,
+  setPromotionHandler,
+  discoverOpportunities,
+  publishNews,
+  publishOpportunitySlot,
+  startScheduler
+};

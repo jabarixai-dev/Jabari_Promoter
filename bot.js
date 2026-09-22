@@ -6,6 +6,10 @@ const dns = require("dns").promises;
 const TelegramBot = require("node-telegram-bot-api");
 const { createClient } = require("@supabase/supabase-js");
 const websiteBlog = require("./lib/website/blog");
+const websiteShop = require("./lib/website/shop");
+const websiteReviews = require("./lib/website/reviews");
+const websiteAbout = require("./lib/website/about");
+const websiteHome = require("./lib/website/home");
 const web3Automation = require("./web3-automation");
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -407,8 +411,6 @@ function campaignPreview(c) {
   return `Campaign Preview\n\nTitle:\n${c.title || "Not set"}\n\nDescription:\n${c.description || "Not set"}\n\nURL:\n${c.blog_url || "Not set"}\n\nStatus: ${c.is_active ? "🟢 Active" : "⚪ Saved"}`;
 }
 
-
-
 web3Automation.setPromotionHandler(async ({ title, description, url }) => {
   if (mode !== "live") return { sent: 0, dryRun: true };
   const previous = await getActiveCampaign();
@@ -424,20 +426,6 @@ web3Automation.setPromotionHandler(async ({ title, description, url }) => {
   }
 });
 
-function mainMenuText() {
-  return "🚀 Jabari Promoter\n\nChoose what you want to do:";
-}
-
-function mainMenu() {
-  return menu([
-    [btn("📝 Campaigns", "menu_campaigns"), btn("🌐 Website Blog", "menu_website_blog")],
-    [btn("👥 Contacts", "menu_contacts"), btn("📧 Promote", "menu_promote")],
-    [btn("🕵️ Email Scanner", "menu_scanner"), btn("📊 Status", "menu_status")],
-    [btn("🧪 Test Email", "menu_testemail")],
-    [btn("🤖 Web3 Automation", "menu_web3_automation")]
-  ]);
-}
-
 async function showWeb3AutomationMenu(chatId, messageId) {
   const status = await web3Automation.automationStatus();
   const s = status.settings;
@@ -452,6 +440,23 @@ async function showWeb3AutomationMenu(chatId, messageId) {
   ];
   if (messageId) return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
   return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: rows } });
+}
+
+
+function mainMenuText() {
+  return "🚀 Jabari Promoter\n\nChoose what you want to do:";
+}
+
+function mainMenu() {
+  return menu([
+    [btn("📝 Campaigns", "menu_campaigns"), btn("🌐 Website Blog", "menu_website_blog")],
+    [btn("🛍️ Website Shop", "menu_website_shop"), btn("⭐ Website Reviews", "menu_website_reviews")],
+    [btn("👤 Website About", "menu_website_about"), btn("🏠 Website Home", "menu_website_home")],
+    [btn("👥 Contacts", "menu_contacts"), btn("📧 Promote", "menu_promote")],
+    [btn("🕵️ Email Scanner", "menu_scanner"), btn("📊 Status", "menu_status")],
+    [btn("🧪 Test Email", "menu_testemail")],
+    [btn("🤖 Web3 Automation", "menu_web3_automation")]
+  ]);
 }
 
 async function showMain(chatId, messageId) {
@@ -524,6 +529,288 @@ async function startWebsiteBlogWizard(chatId, messageId, mode, post = null) {
     inline_keyboard: [[btn("❌ Cancel", "website_blog_cancel")]]
   });
 }
+
+async function showWebsiteShopMenu(chatId, messageId) {
+  const products = await websiteShop.listProducts();
+  const text = `🛍️ Website Shop
+
+Products in GitHub: ${products.length}
+
+This uses the same shop/products.json as the Jabari website.`;
+
+  const rows = [
+    [btn("📋 View Products", "website_shop_list")],
+    [btn("➕ New Product", "website_shop_create")],
+    [btn("🔄 Refresh", "menu_website_shop")],
+    [btn("⬅️ Back", "menu_main")]
+  ];
+
+  if (messageId) return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
+  return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: rows } });
+}
+
+async function showWebsiteShopList(chatId, messageId) {
+  const products = await websiteShop.listProducts();
+
+  if (!products.length) {
+    const kb = {
+      inline_keyboard: [
+        [btn("➕ New Product", "website_shop_create")],
+        [btn("⬅️ Back", "menu_website_shop")]
+      ]
+    };
+
+    const text = "📋 Website Shop\n\nNo products found.";
+
+    if (messageId) return safeEdit(chatId, messageId, text, kb);
+    return bot.sendMessage(chatId, text, { reply_markup: kb });
+  }
+
+  const rows = products.slice(0, 30).map(p => [
+    btn(
+      `${p.active === false ? "⚪" : "🟢"} ${p.title || "Untitled"} — ₦${Number(p.priceNaira || 0).toLocaleString()}`.slice(0, 60),
+      `website_shop_view:${p.slug}`
+    )
+  ]);
+
+  rows.push([btn("➕ New Product", "website_shop_create")]);
+  rows.push([btn("⬅️ Back", "menu_website_shop")]);
+
+  const text =
+    `📋 Website Shop\n\nShowing ${Math.min(products.length, 30)} of ${products.length} products.`;
+
+  if (messageId) return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
+  return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: rows } });
+}
+
+async function showWebsiteShopDetails(chatId, messageId, slug) {
+  const products = await websiteShop.listProducts();
+  const p = products.find(x => String(x.slug) === String(slug));
+
+  if (!p) throw new Error("Shop product not found.");
+
+  const text =
+    `🛍️ ${p.title}\n\n` +
+    `Price: ₦${Number(p.priceNaira || 0).toLocaleString()}\n` +
+    `Status: ${p.active === false ? "⚪ Inactive" : "🟢 Active"}\n` +
+    `PDF: ${p.file || "—"}\n\n` +
+    `${p.desc || ""}`;
+
+  const toggle = p.active === false ? "🟢 Activate" : "⚪ Deactivate";
+
+  const kb = {
+    inline_keyboard: [
+      [
+        btn("✏️ Edit", `website_shop_edit:${p.slug}`),
+        btn(toggle, `website_shop_toggle:${p.slug}`)
+      ],
+      [btn("🗑️ Delete", `website_shop_delete:${p.slug}`)],
+      [btn("⬅️ Back", "website_shop_list")]
+    ]
+  };
+
+  if (messageId) return safeEdit(chatId, messageId, text, kb);
+  return bot.sendMessage(chatId, text, { reply_markup: kb });
+}
+
+async function startWebsiteShopWizard(chatId, messageId, mode, product = null) {
+  inputState = {
+    chatId,
+    type: mode === "edit" ? "website_shop_edit" : "website_shop_create",
+    step: "title",
+    slug: product?.slug || "",
+    title: product?.title || "",
+    desc: product?.desc || "",
+    priceNaira: product?.priceNaira || "",
+    file: product?.file || ""
+  };
+
+  const heading =
+    mode === "edit"
+      ? "✏️ Edit Website Shop Product"
+      : "➕ New Website Shop Product";
+
+  const prompt =
+    mode === "edit"
+      ? `Current title:\n${product?.title || "Untitled"}\n\nEnter the new title.`
+      : "Enter the product title.";
+
+  return safeEdit(
+    chatId,
+    messageId,
+    `${heading}\n\n${prompt}`,
+    { inline_keyboard: [[btn("❌ Cancel", "website_shop_cancel")]] }
+  );
+}
+
+
+async function showWebsiteReviewsMenu(chatId, messageId) {
+  const reviews = await websiteReviews.listReviews();
+  const pending = reviews.filter(r => r.status !== 'hidden').length;
+  const hidden = reviews.filter(r => r.status === 'hidden').length;
+  const text = `⭐ Website Reviews\n\nTotal: ${reviews.length}\nVisible: ${pending}\nHidden: ${hidden}\n\nThis uses the same reviews/reviews.json as the Jabari website.`;
+  const rows = [
+    [btn("📋 View Reviews", "website_reviews_list")],
+    [btn("🔄 Refresh", "menu_website_reviews")],
+    [btn("⬅️ Back", "menu_main")]
+  ];
+  if (messageId) return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
+  return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: rows } });
+}
+
+async function showWebsiteReviewsList(chatId, messageId) {
+  const reviews = await websiteReviews.listReviews();
+  if (!reviews.length) {
+    const kb = { inline_keyboard: [[btn("🔄 Refresh", "menu_website_reviews")], [btn("⬅️ Back", "menu_website_reviews")]] };
+    const text = "📋 Website Reviews\n\nNo reviews found.";
+    if (messageId) return safeEdit(chatId, messageId, text, kb);
+    return bot.sendMessage(chatId, text, { reply_markup: kb });
+  }
+  const rows = reviews.slice(0, 30).map(r => {
+    const stars = '★'.repeat(Math.max(0, Math.min(5, Number(r.rating) || 0)));
+    const status = r.status === 'hidden' ? '⚪' : '🟢';
+    return [btn(`${status} ${stars || '—'} ${String(r.name || 'Anonymous').slice(0, 30)}`.slice(0, 60), `website_review_view:${r.id}`)];
+  });
+  rows.push([btn("🔄 Refresh", "menu_website_reviews")]);
+  rows.push([btn("⬅️ Back", "menu_website_reviews")]);
+  const text = `📋 Website Reviews\n\nShowing ${Math.min(reviews.length, 30)} of ${reviews.length} reviews.`;
+  if (messageId) return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
+  return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: rows } });
+}
+
+async function showWebsiteReviewDetails(chatId, messageId, id) {
+  const reviews = await websiteReviews.listReviews();
+  const r = reviews.find(x => String(x.id) === String(id));
+  if (!r) throw new Error("Review not found.");
+  const stars = '★'.repeat(Math.max(0, Math.min(5, Number(r.rating) || 0))) + '☆'.repeat(Math.max(0, 5 - Math.min(5, Number(r.rating) || 0)));
+  const date = r.createdAt ? new Date(r.createdAt).toLocaleString() : '—';
+  const text = `⭐ Website Review\n\n${r.name || 'Anonymous'}\n${stars}\n\n${r.message || ''}\n\nStatus: ${r.status === 'hidden' ? '⚪ Hidden' : '🟢 Visible'}\nDate: ${date}\n\n${r.reply ? `Jabari reply:\n${r.reply}` : 'No reply yet.'}`;
+  const statusButton = r.status === 'hidden'
+    ? btn("✅ Approve", `website_review_approve:${r.id}`)
+    : btn("👁️ Hide", `website_review_hide:${r.id}`);
+  const rows = [
+    [statusButton, btn(r.reply ? "✏️ Edit Reply" : "💬 Reply", `website_review_reply:${r.id}`)],
+    ...(r.reply ? [[btn("🗑️ Delete Reply", `website_review_delete_reply:${r.id}`)]] : []),
+    [btn("❌ Delete Review", `website_review_delete:${r.id}`)],
+    [btn("⬅️ Back", "website_reviews_list")]
+  ];
+  if (messageId) return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
+  return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: rows } });
+}
+
+
+async function showWebsiteAboutMenu(chatId, messageId) {
+  const about = await websiteAbout.getAbout();
+  const text = `👤 Website About\n\nBio:\n${about.bio}\n\nServices:\n${about.services.map((s, i) => `${i + 1}. ${s.title}\n${s.description}`).join("\n\n")}\n\nThis uses the same about/content.json as the Jabari website.`;
+  const rows = [
+    [btn("✏️ Edit About", "website_about_edit")],
+    [btn("🔄 Refresh", "menu_website_about")],
+    [btn("⬅️ Back", "menu_main")]
+  ];
+  if (messageId) return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
+  return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: rows } });
+}
+
+async function startWebsiteAboutWizard(chatId, messageId) {
+  const about = await websiteAbout.getAbout();
+  inputState = {
+    chatId,
+    type: "website_about_edit",
+    step: "bio",
+    bio: about.bio,
+    services: about.services.map(s => ({ title: s.title, description: s.description }))
+  };
+  return safeEdit(chatId, messageId,
+    `✏️ Edit Website About\n\nCurrent bio:\n${about.bio}\n\nSend the new bio.`,
+    { inline_keyboard: [[btn("❌ Cancel", "website_about_cancel")]] }
+  );
+}
+
+async function showWebsiteAboutPreview(chatId, messageId) {
+  const s = inputState;
+  const text = `👤 About Preview\n\nBio:\n${s.bio}\n\n${s.services.map((x, i) => `${i + 1}. ${x.title}\n${x.description}`).join("\n\n")}\n\nSave these changes to the website?`;
+  return safeEdit(chatId, messageId, text, {
+    inline_keyboard: [
+      [btn("✅ Save to Website", "website_about_save")],
+      [btn("🔄 Start Again", "website_about_edit")],
+      [btn("❌ Cancel", "website_about_cancel")]
+    ]
+  });
+}
+
+
+async function showWebsiteHomeMenu(chatId, messageId) {
+  const home = await websiteHome.getHome();
+  const text = `🏠 Website Home
+
+Name: ${home.name}
+Tagline: ${home.tagline}
+
+Social links: ${Object.values(home.socials).filter(Boolean).length}/4
+Home buttons: ${home.buttons.length}/4
+Logo: ${home.logoUrl ? "Custom logo" : "Current website logo"}
+
+This uses the same home/content.json as the Jabari website.`;
+  const rows = [
+    [btn("✏️ Edit Home Text", "website_home_text")],
+    [btn("🔗 Social Links", "website_home_socials")],
+    [btn("🔘 Home Buttons", "website_home_buttons")],
+    [btn("🖼️ Change Logo", "website_home_logo")],
+    [btn("👀 Preview", "website_home_preview")],
+    [btn("🔄 Refresh", "menu_website_home")],
+    [btn("⬅️ Back", "menu_main")]
+  ];
+  if (messageId) return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
+  return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: rows } });
+}
+
+async function startWebsiteHomeTextWizard(chatId, messageId) {
+  const home = await websiteHome.getHome();
+  inputState = { chatId, type: "website_home_text", step: "name", home };
+  return safeEdit(chatId, messageId,
+    `✏️ Edit Website Home Text\n\nCurrent name:\n${home.name}\n\nSend the new name.`,
+    { inline_keyboard: [[btn("❌ Cancel", "website_home_cancel")]] }
+  );
+}
+
+async function startWebsiteHomeSocialWizard(chatId, messageId) {
+  const home = await websiteHome.getHome();
+  inputState = { chatId, type: "website_home_socials", step: "whatsapp", home };
+  return safeEdit(chatId, messageId,
+    `🔗 Edit Home Social Links\n\nCurrent WhatsApp:\n${home.socials.whatsapp}\n\nSend the new WhatsApp link.`,
+    { inline_keyboard: [[btn("❌ Cancel", "website_home_cancel")]] }
+  );
+}
+
+async function startWebsiteHomeButtonsWizard(chatId, messageId) {
+  const home = await websiteHome.getHome();
+  inputState = { chatId, type: "website_home_buttons", step: "b1_text", home };
+  return safeEdit(chatId, messageId,
+    `🔘 Edit Home Buttons\n\nButton 1 current text: ${home.buttons[0].text}\n\nSend the new Button 1 text.`,
+    { inline_keyboard: [[btn("❌ Cancel", "website_home_cancel")]] }
+  );
+}
+
+async function showWebsiteHomePreview(chatId, messageId) {
+  const home = await websiteHome.getHome();
+  const text = `🏠 Website Home Preview
+
+${home.name}
+${home.tagline}
+
+WhatsApp: ${home.socials.whatsapp}
+X: ${home.socials.x}
+Telegram: ${home.socials.telegram}
+YouTube: ${home.socials.youtube}
+
+Buttons:
+${home.buttons.map((b,i) => `${i + 1}. ${b.text} → ${b.href}`).join("\n")}
+
+Footer:
+${home.footer}`;
+  return safeEdit(chatId, messageId, text, { inline_keyboard: [[btn("🏠 Website Home", "menu_website_home")], [btn("🏠 Main Menu", "menu_main")]] });
+}
+
 
 async function showCampaignMenu(chatId, messageId) {
   const campaigns = await getCampaigns();
@@ -741,6 +1028,44 @@ function createGmailMessage(to, subject, text) {
   ].join("\r\n"));
 }
 
+
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+async function getTelegramFileLinkWithRetry(fileId, attempts = 4) {
+  let lastError;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const result = await bot.getFileLink(fileId);
+      if (result) return result;
+    } catch (e) {
+      lastError = e;
+      if (i < attempts - 1) await sleep(800 * (i + 1));
+    }
+  }
+  throw lastError || new Error("Could not get the Telegram file link.");
+}
+
+async function downloadBinary(url, attempts = 4) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const response = await fetch(url, {
+        headers: { "User-Agent": "JabariPromoter/1.0", "Connection": "close" },
+        signal: AbortSignal.timeout(30000)
+      });
+      if (!response.ok) throw new Error(`Telegram download returned HTTP ${response.status}.`);
+      const buffer = Buffer.from(await response.arrayBuffer());
+      if (!buffer.length) throw new Error("Downloaded file is empty.");
+      if (buffer.length > 10 * 1024 * 1024) throw new Error("Downloaded file is larger than 10 MB.");
+      return buffer;
+    } catch (e) {
+      lastError = e;
+      if (attempt < attempts) await sleep(1000 * attempt);
+    }
+  }
+  throw lastError || new Error("Could not download the Telegram file.");
+}
+
 async function sendEmail(to, subject, text) {
   if (mode !== "live") {
     console.log(`[DRY RUN] Email to ${to}: ${subject}`);
@@ -867,6 +1192,181 @@ bot.on("message", async msg => {
       }
     }
 
+if (s.type === "website_shop_create" || s.type === "website_shop_edit") {
+  if (s.step === "title") {
+    if (!msg.text.trim()) {
+      return bot.sendMessage(msg.chat.id, "Please enter a product title.");
+    }
+
+    s.title = msg.text.trim();
+    s.step = "desc";
+
+    return bot.sendMessage(
+      msg.chat.id,
+      "Enter the product description."
+    );
+  }
+
+  if (s.step === "desc") {
+    if (!msg.text.trim()) {
+      return bot.sendMessage(msg.chat.id, "Please enter a product description.");
+    }
+
+    s.desc = msg.text.trim();
+    s.step = "price";
+
+    return bot.sendMessage(
+      msg.chat.id,
+      "Enter the price in Nigerian Naira. Example: 1500"
+    );
+  }
+
+  if (s.step === "price") {
+    const price = Number(msg.text.replace(/[^0-9.]/g, ""));
+
+    if (!Number.isFinite(price) || price <= 0) {
+      return bot.sendMessage(
+        msg.chat.id,
+        "Please enter a valid price in Naira."
+      );
+    }
+
+    s.priceNaira = price;
+    s.step = "pdf";
+
+    return bot.sendMessage(
+      msg.chat.id,
+      s.type === "website_shop_edit"
+        ? "📄 Send a replacement PDF, or tap Keep Current PDF."
+        : "📄 Send the product PDF.",
+      {
+        reply_markup: {
+          inline_keyboard:
+            s.type === "website_shop_edit"
+              ? [
+                  [btn("📄 Keep Current PDF", "website_shop_keep_pdf")],
+                  [btn("❌ Cancel", "website_shop_cancel")]
+                ]
+              : [[btn("❌ Cancel", "website_shop_cancel")]]
+        }
+      }
+    );
+  }
+}
+
+
+    if (s.type === "website_review_reply") {
+      const reply = msg.text.trim();
+      if (!reply) return bot.sendMessage(msg.chat.id, "Please enter a reply, or tap Cancel.");
+      await websiteReviews.setReply(s.id, reply);
+      inputState = null;
+      return bot.sendMessage(msg.chat.id, "✅ Reply saved to the website.", { reply_markup: { inline_keyboard: [[btn("⭐ Review", `website_review_view:${s.id}`)], [btn("📋 Reviews", "website_reviews_list")], [btn("🏠 Main Menu", "menu_main")]] } });
+    }
+
+
+    if (s.type === "website_home_text") {
+      if (s.step === "name") {
+        const value = msg.text.trim();
+        if (!value) return bot.sendMessage(msg.chat.id, "Please enter the Home name.");
+        s.home.name = value; s.step = "tagline";
+        return bot.sendMessage(msg.chat.id, `Current tagline:\n${s.home.tagline}\n\nSend the new tagline.`);
+      }
+      if (s.step === "tagline") {
+        const value = msg.text.trim();
+        if (!value) return bot.sendMessage(msg.chat.id, "Please enter the Home tagline.");
+        s.home.tagline = value; s.step = "footer";
+        return bot.sendMessage(msg.chat.id, `Current footer:\n${s.home.footer}\n\nSend the new Home footer.`);
+      }
+      if (s.step === "footer") {
+        const value = msg.text.trim();
+        if (!value) return bot.sendMessage(msg.chat.id, "Please enter the Home footer.");
+        s.home.footer = value; s.step = "preview";
+        return bot.sendMessage(msg.chat.id, `🏠 Home Text Preview\n\nName: ${s.home.name}\nTagline: ${s.home.tagline}\nFooter: ${s.home.footer}\n\nSave these changes?`, { reply_markup: { inline_keyboard: [[btn("✅ Save to Website", "website_home_save")], [btn("🔄 Start Again", "website_home_text")], [btn("❌ Cancel", "website_home_cancel")]] } });
+      }
+    }
+
+    if (s.type === "website_home_socials") {
+      if (s.step === "whatsapp") {
+        if (!/^https:\/\//i.test(msg.text.trim())) return bot.sendMessage(msg.chat.id, "Please send a valid https:// WhatsApp link.");
+        s.home.socials.whatsapp = msg.text.trim(); s.step = "x";
+        return bot.sendMessage(msg.chat.id, `Current X link:\n${s.home.socials.x}\n\nSend the new X link.`);
+      }
+      if (s.step === "x") {
+        if (!/^https:\/\//i.test(msg.text.trim())) return bot.sendMessage(msg.chat.id, "Please send a valid https:// link.");
+        s.home.socials.x = msg.text.trim(); s.step = "telegram";
+        return bot.sendMessage(msg.chat.id, `Current Telegram link:\n${s.home.socials.telegram}\n\nSend the new Telegram link.`);
+      }
+      if (s.step === "telegram") {
+        if (!/^https:\/\//i.test(msg.text.trim())) return bot.sendMessage(msg.chat.id, "Please send a valid https:// link.");
+        s.home.socials.telegram = msg.text.trim(); s.step = "youtube";
+        return bot.sendMessage(msg.chat.id, `Current YouTube link:\n${s.home.socials.youtube}\n\nSend the new YouTube link.`);
+      }
+      if (s.step === "youtube") {
+        if (!/^https:\/\//i.test(msg.text.trim())) return bot.sendMessage(msg.chat.id, "Please send a valid https:// link.");
+        s.home.socials.youtube = msg.text.trim(); s.step = "preview";
+        return bot.sendMessage(msg.chat.id, `🔗 Social Links Preview\n\nWhatsApp: ${s.home.socials.whatsapp}\nX: ${s.home.socials.x}\nTelegram: ${s.home.socials.telegram}\nYouTube: ${s.home.socials.youtube}\n\nSave these changes?`, { reply_markup: { inline_keyboard: [[btn("✅ Save to Website", "website_home_save")], [btn("🔗 Start Again", "website_home_socials")], [btn("❌ Cancel", "website_home_cancel")]] } });
+      }
+    }
+
+    if (s.type === "website_home_buttons") {
+      const validLink = value => /^#[A-Za-z0-9_-]+$/.test(value) || /^https:\/\//i.test(value);
+      if (s.step === "b1_text") { const v=msg.text.trim(); if(!v) return bot.sendMessage(msg.chat.id,"Enter Button 1 text."); s.home.buttons[0].text=v; s.step="b1_href"; return bot.sendMessage(msg.chat.id, `Current Button 1 link:\n${s.home.buttons[0].href}\n\nSend the new link (#section or https://).`); }
+      if (s.step === "b1_href") { const v=msg.text.trim(); if(!validLink(v)) return bot.sendMessage(msg.chat.id,"Use a #section link or https:// URL."); s.home.buttons[0].href=v; s.step="b2_text"; return bot.sendMessage(msg.chat.id, `Button 2 current text: ${s.home.buttons[1].text}\n\nSend the new Button 2 text.`); }
+      if (s.step === "b2_text") { const v=msg.text.trim(); if(!v) return bot.sendMessage(msg.chat.id,"Enter Button 2 text."); s.home.buttons[1].text=v; s.step="b2_href"; return bot.sendMessage(msg.chat.id, `Current Button 2 link:\n${s.home.buttons[1].href}\n\nSend the new link.`); }
+      if (s.step === "b2_href") { const v=msg.text.trim(); if(!validLink(v)) return bot.sendMessage(msg.chat.id,"Use a #section link or https:// URL."); s.home.buttons[1].href=v; s.step="b3_text"; return bot.sendMessage(msg.chat.id, `Button 3 current text: ${s.home.buttons[2].text}\n\nSend the new Button 3 text.`); }
+      if (s.step === "b3_text") { const v=msg.text.trim(); if(!v) return bot.sendMessage(msg.chat.id,"Enter Button 3 text."); s.home.buttons[2].text=v; s.step="b3_href"; return bot.sendMessage(msg.chat.id, `Current Button 3 link:\n${s.home.buttons[2].href}\n\nSend the new link.`); }
+      if (s.step === "b3_href") { const v=msg.text.trim(); if(!validLink(v)) return bot.sendMessage(msg.chat.id,"Use a #section link or https:// URL."); s.home.buttons[2].href=v; s.step="b4_text"; return bot.sendMessage(msg.chat.id, `Button 4 current text: ${s.home.buttons[3].text}\n\nSend the new Button 4 text.`); }
+      if (s.step === "b4_text") { const v=msg.text.trim(); if(!v) return bot.sendMessage(msg.chat.id,"Enter Button 4 text."); s.home.buttons[3].text=v; s.step="b4_href"; return bot.sendMessage(msg.chat.id, `Current Button 4 link:\n${s.home.buttons[3].href}\n\nSend the new link.`); }
+      if (s.step === "b4_href") { const v=msg.text.trim(); if(!validLink(v)) return bot.sendMessage(msg.chat.id,"Use a #section link or https:// URL."); s.home.buttons[3].href=v; s.step="preview"; return bot.sendMessage(msg.chat.id, `🔘 Home Buttons Preview\n\n${s.home.buttons.map((b,i)=>`${i+1}. ${b.text} → ${b.href}`).join("\n")}\n\nSave these changes?`, {reply_markup:{inline_keyboard:[[btn("✅ Save to Website","website_home_save")],[btn("🔘 Start Again","website_home_buttons")],[btn("❌ Cancel","website_home_cancel")]]}}); }
+    }
+
+    if (s.type === "website_about_edit") {
+      if (s.step === "bio") {
+        const bio = msg.text.trim();
+        if (!bio) return bot.sendMessage(msg.chat.id, "Please enter the About bio.");
+        s.bio = bio; s.step = "service1_title";
+        return bot.sendMessage(msg.chat.id, "Service 1 of 3\n\nEnter the service title.\n\nExample: Website Design");
+      }
+      if (s.step === "service1_title") {
+        const title = msg.text.trim();
+        if (!title) return bot.sendMessage(msg.chat.id, "Please enter the service title.");
+        s.services[0].title = title; s.step = "service1_desc";
+        return bot.sendMessage(msg.chat.id, "Now enter the description for Service 1.");
+      }
+      if (s.step === "service1_desc") {
+        const value = msg.text.trim();
+        if (!value) return bot.sendMessage(msg.chat.id, "Please enter the service description.");
+        s.services[0].description = value; s.step = "service2_title";
+        return bot.sendMessage(msg.chat.id, "Service 2 of 3\n\nEnter the service title.");
+      }
+      if (s.step === "service2_title") {
+        const title = msg.text.trim();
+        if (!title) return bot.sendMessage(msg.chat.id, "Please enter the service title.");
+        s.services[1].title = title; s.step = "service2_desc";
+        return bot.sendMessage(msg.chat.id, "Now enter the description for Service 2.");
+      }
+      if (s.step === "service2_desc") {
+        const value = msg.text.trim();
+        if (!value) return bot.sendMessage(msg.chat.id, "Please enter the service description.");
+        s.services[1].description = value; s.step = "service3_title";
+        return bot.sendMessage(msg.chat.id, "Service 3 of 3\n\nEnter the service title.");
+      }
+      if (s.step === "service3_title") {
+        const title = msg.text.trim();
+        if (!title) return bot.sendMessage(msg.chat.id, "Please enter the service title.");
+        s.services[2].title = title; s.step = "service3_desc";
+        return bot.sendMessage(msg.chat.id, "Now enter the description for Service 3.");
+      }
+      if (s.step === "service3_desc") {
+        const value = msg.text.trim();
+        if (!value) return bot.sendMessage(msg.chat.id, "Please enter the service description.");
+        s.services[2].description = value; s.step = "preview";
+        return bot.sendMessage(msg.chat.id, `👤 About Preview\n\nBio:\n${s.bio}\n\n${s.services.map((x, i) => `${i + 1}. ${x.title}\n${x.description}`).join("\n\n")}\n\nSave these changes to the website?`, {
+          reply_markup: { inline_keyboard: [[btn("✅ Save to Website", "website_about_save")], [btn("🔄 Start Again", "website_about_edit")], [btn("❌ Cancel", "website_about_cancel")]] }
+        });
+      }
+    }
+
     if (s.type === "campaign_create" || s.type === "campaign_edit") {
       if (s.step === "title") {
         if (!msg.text.trim()) return bot.sendMessage(msg.chat.id, "Please enter a campaign title.");
@@ -913,7 +1413,6 @@ bot.on("callback_query", async q => {
     await answer(q);
 
     if (data === "menu_main") { inputState = null; return showMain(chatId, messageId); }
-    if (data === "menu_campaigns") return showCampaignMenu(chatId, messageId);
     if (data === "menu_web3_automation") return showWeb3AutomationMenu(chatId, messageId);
     if (data === "web3_toggle") {
       const current = await web3Automation.getSettings();
@@ -935,7 +1434,192 @@ bot.on("callback_query", async q => {
       const result = await web3Automation.publishOpportunitySlot("Manual");
       return safeEdit(chatId, messageId, result.skipped ? `⚪ ${result.reason}` : `✅ Opportunity published.\n\n${result.post.title}\n${result.post.url}`, { inline_keyboard: [[btn("🤖 Automation", "menu_web3_automation")]] });
     }
+    if (data === "menu_campaigns") return showCampaignMenu(chatId, messageId);
     if (data === "menu_website_blog") return showWebsiteBlogMenu(chatId, messageId);
+    if (data === "menu_website_shop") return showWebsiteShopMenu(chatId, messageId);
+
+
+    if (data === "menu_website_home") return showWebsiteHomeMenu(chatId, messageId);
+    if (data === "website_home_text") return startWebsiteHomeTextWizard(chatId, messageId);
+    if (data === "website_home_socials") return startWebsiteHomeSocialWizard(chatId, messageId);
+    if (data === "website_home_buttons") return startWebsiteHomeButtonsWizard(chatId, messageId);
+    if (data === "website_home_logo") {
+      inputState = { chatId, type: "website_home_logo", step: "photo" };
+      return safeEdit(chatId, messageId, "🖼️ Change Website Home Logo\n\nSend the new logo as a Telegram photo.\n\nRecommended: square JPG/PNG/WebP, 360×360 or larger, under 2 MB.", { inline_keyboard: [[btn("❌ Cancel", "website_home_cancel")]] });
+    }
+    if (data === "website_home_preview") return showWebsiteHomePreview(chatId, messageId);
+    if (data === "website_home_cancel") { inputState = null; return showWebsiteHomeMenu(chatId, messageId); }
+
+    if (data === "website_home_save") {
+      if (!inputState || inputState.chatId !== chatId || !["website_home_text","website_home_socials","website_home_buttons"].includes(inputState.type)) return showWebsiteHomeMenu(chatId, messageId);
+      const s = inputState;
+      await safeEdit(chatId, messageId, "⏳ Saving Home content to the Jabari website GitHub repository...");
+      await websiteHome.saveHome(s.home);
+      inputState = null;
+      return safeEdit(chatId, messageId, "✅ Website Home updated.\n\nThe same home/content.json used by your Jabari website has been updated.", { inline_keyboard: [[btn("🏠 Website Home", "menu_website_home")], [btn("🏠 Main Menu", "menu_main")]] });
+    }
+    if (data === "menu_website_about") return showWebsiteAboutMenu(chatId, messageId);
+    if (data === "website_about_edit") {
+      return startWebsiteAboutWizard(chatId, messageId);
+    }
+    if (data === "website_about_cancel") {
+      inputState = null;
+      return showWebsiteAboutMenu(chatId, messageId);
+    }
+    if (data === "website_about_save") {
+      if (!inputState || inputState.chatId !== chatId || inputState.type !== "website_about_edit") return showWebsiteAboutMenu(chatId, messageId);
+      const s = inputState;
+      await safeEdit(chatId, messageId, "⏳ Saving About content to the Jabari website GitHub repository...");
+      const about = await websiteAbout.saveAbout({ bio: s.bio, services: s.services });
+      inputState = null;
+      return safeEdit(chatId, messageId, `✅ Website About updated.\n\nThe same about/content.json used by your Jabari website has been updated.`, { inline_keyboard: [[btn("👤 Website About", "menu_website_about")], [btn("🏠 Main Menu", "menu_main")]] });
+    }
+
+    if (data === "menu_website_reviews") return showWebsiteReviewsMenu(chatId, messageId);
+    if (data === "website_reviews_list") return showWebsiteReviewsList(chatId, messageId);
+    if (data.startsWith("website_review_view:")) return showWebsiteReviewDetails(chatId, messageId, data.slice("website_review_view:".length));
+    if (data.startsWith("website_review_approve:")) {
+      const id = data.slice("website_review_approve:".length);
+      await websiteReviews.setStatus(id, "approved");
+      return showWebsiteReviewDetails(chatId, messageId, id);
+    }
+    if (data.startsWith("website_review_hide:")) {
+      const id = data.slice("website_review_hide:".length);
+      await websiteReviews.setStatus(id, "hidden");
+      return showWebsiteReviewDetails(chatId, messageId, id);
+    }
+    if (data.startsWith("website_review_reply:")) {
+      const id = data.slice("website_review_reply:".length);
+      const reviews = await websiteReviews.listReviews();
+      const r = reviews.find(x => String(x.id) === String(id));
+      if (!r) throw new Error("Review not found.");
+      inputState = { chatId, type: "website_review_reply", step: "reply", id, existing: r.reply || "" };
+      return safeEdit(chatId, messageId, `💬 Reply to ${r.name || "Anonymous"}\n\nCurrent reply:\n${r.reply || "(none)"}\n\nSend the new reply as your next message.`, { inline_keyboard: [[btn("❌ Cancel", `website_review_view:${id}`)]] });
+    }
+    if (data.startsWith("website_review_delete_reply:")) {
+      const id = data.slice("website_review_delete_reply:".length);
+      await websiteReviews.deleteReply(id);
+      return showWebsiteReviewDetails(chatId, messageId, id);
+    }
+    if (data.startsWith("website_review_delete:")) {
+      const id = data.slice("website_review_delete:".length);
+      const reviews = await websiteReviews.listReviews();
+      const r = reviews.find(x => String(x.id) === String(id));
+      if (!r) throw new Error("Review not found.");
+      return safeEdit(chatId, messageId, `❌ Delete Review\n\n${r.name || "Anonymous"}\n\n${String(r.message || "").slice(0, 500)}\n\nAre you sure?`, { inline_keyboard: [[btn("❌ Yes, Delete", `website_review_delete_yes:${id}`)], [btn("⬅️ Keep It", `website_review_view:${id}`)]] });
+    }
+    if (data.startsWith("website_review_delete_yes:")) {
+      await websiteReviews.deleteReview(data.slice("website_review_delete_yes:".length));
+      return showWebsiteReviewsList(chatId, messageId);
+    }
+
+    
+    if (data === "website_shop_list") return showWebsiteShopList(chatId, messageId);
+    
+    if (data === "website_shop_create") {
+      return startWebsiteShopWizard(chatId, messageId, "create");
+    }
+    
+    if (data === "website_shop_cancel") {
+      inputState = null;
+      return showWebsiteShopMenu(chatId, messageId);
+    }
+    
+    if (data === "website_shop_keep_pdf") {
+      if (
+        !inputState ||
+        inputState.chatId !== chatId ||
+        !["website_shop_create", "website_shop_edit"].includes(inputState.type)
+      ) {
+        return showWebsiteShopMenu(chatId, messageId);
+      }
+    
+      if (inputState.type === "website_shop_create") {
+        return bot.sendMessage(chatId, "A new product requires a PDF. Please send the PDF.");
+      }
+    
+      const s = inputState;
+    
+      const p = await websiteShop.saveProduct({
+        slug: s.slug,
+        title: s.title,
+        desc: s.desc,
+        priceNaira: s.priceNaira,
+        file: s.file,
+        active: true
+      });
+    
+      inputState = null;
+    
+      return safeEdit(
+        chatId,
+        messageId,
+        `✅ Product updated.\n\n${p.title}`,
+        {
+          inline_keyboard: [
+            [btn("📋 View Products", "website_shop_list")],
+            [btn("🛍️ Website Shop", "menu_website_shop"), btn("⭐ Website Reviews", "menu_website_reviews")],
+    [btn("👤 Website About", "menu_website_about")],
+            [btn("🏠 Main Menu", "menu_main")]
+          ]
+        }
+      );
+    }
+    
+    if (data.startsWith("website_shop_view:")) {
+      return showWebsiteShopDetails(
+        chatId,
+        messageId,
+        data.slice("website_shop_view:".length)
+      );
+    }
+    
+    if (data.startsWith("website_shop_edit:")) {
+      const slug = data.slice("website_shop_edit:".length);
+      const products = await websiteShop.listProducts();
+      const p = products.find(x => x.slug === slug);
+    
+      if (!p) throw new Error("Shop product not found.");
+    
+      return startWebsiteShopWizard(chatId, messageId, "edit", p);
+    }
+    
+    if (data.startsWith("website_shop_toggle:")) {
+      const slug = data.slice("website_shop_toggle:".length);
+    
+      await websiteShop.toggleProduct(slug);
+    
+      return showWebsiteShopDetails(chatId, messageId, slug);
+    }
+    
+    if (data.startsWith("website_shop_delete:")) {
+      const slug = data.slice("website_shop_delete:".length);
+      const products = await websiteShop.listProducts();
+      const p = products.find(x => x.slug === slug);
+    
+      if (!p) throw new Error("Shop product not found.");
+    
+      return safeEdit(
+        chatId,
+        messageId,
+        `🗑️ Delete Shop Product\n\n${p.title}\n\nAre you sure?`,
+        {
+          inline_keyboard: [
+            [btn("🗑️ Yes, Delete", `website_shop_delete_yes:${slug}`)],
+            [btn("⬅️ Keep It", `website_shop_view:${slug}`)]
+          ]
+        }
+      );
+    }
+    
+    if (data.startsWith("website_shop_delete_yes:")) {
+      await websiteShop.deleteProduct(
+        data.slice("website_shop_delete_yes:".length)
+      );
+    
+      return showWebsiteShopList(chatId, messageId);
+    }
+    
     if (data === "website_blog_create") {
       return startWebsiteBlogWizard(chatId, messageId, "create");
     }
@@ -1115,6 +1799,103 @@ bot.on("callback_query", async q => {
   }
 });
 
+
+bot.on("photo", async msg => {
+  if (!isOwner(msg) || !inputState || inputState.chatId !== msg.chat.id || inputState.type !== "website_home_logo" || inputState.step !== "photo") return;
+  try {
+    const photo = msg.photo?.[msg.photo.length - 1];
+    if (!photo?.file_id) return bot.sendMessage(msg.chat.id, "❌ I could not read that image. Please send it again.");
+    await bot.sendMessage(msg.chat.id, "⏳ Uploading the new Home logo to the website…");
+    const fileUrl = await getTelegramFileLinkWithRetry(photo.file_id);
+    const buffer = await downloadBinary(fileUrl);
+    const logoUrl = await websiteHome.uploadLogo(buffer, "jabari-home-logo.jpg");
+    const home = await websiteHome.getHome();
+    home.logoUrl = logoUrl;
+    await websiteHome.saveHome(home);
+    inputState = null;
+    return bot.sendMessage(msg.chat.id, "✅ Home logo updated.\n\nThe new logo is now stored in GitHub and linked from home/content.json.", { reply_markup: { inline_keyboard: [[btn("🏠 Website Home", "menu_website_home")], [btn("🏠 Main Menu", "menu_main")]] } });
+  } catch (e) {
+    console.error("Website home logo upload error:", e.message);
+    return bot.sendMessage(msg.chat.id, `❌ Logo upload failed.\n\n${e.message}`);
+  }
+});
+
+bot.on("document", async msg => {
+  if (!isOwner(msg) || !inputState || inputState.chatId !== msg.chat.id) {
+    return;
+  }
+
+  const s = inputState;
+
+  if (
+    !["website_shop_create", "website_shop_edit"].includes(s.type) ||
+    s.step !== "pdf"
+  ) {
+    return;
+  }
+
+  const doc = msg.document;
+
+  if (!doc) return;
+
+  if (
+    String(doc.file_name || "").toLowerCase().slice(-4) !== ".pdf" ||
+    String(doc.mime_type || "").toLowerCase() !== "application/pdf"
+  ) {
+    return bot.sendMessage(msg.chat.id, "❌ Please send a PDF file.");
+  }
+
+  try {
+    await bot.sendMessage(
+      msg.chat.id,
+      "⏳ Uploading the PDF to the Jabari website…"
+    );
+
+    const fileUrl = await getTelegramFileLinkWithRetry(doc.file_id);
+    const buffer = await downloadBinary(fileUrl);
+
+    s.file = await websiteShop.uploadPdf(
+      buffer,
+      doc.file_name || "product.pdf"
+    );
+
+    const p = await websiteShop.saveProduct({
+      slug: s.slug,
+      title: s.title,
+      desc: s.desc,
+      priceNaira: s.priceNaira,
+      file: s.file,
+      active: true
+    });
+
+    inputState = null;
+
+    return bot.sendMessage(
+      msg.chat.id,
+      `✅ Shop product ${s.type === "website_shop_edit" ? "updated" : "created"}.\n\n` +
+      `${p.title}\n₦${Number(p.priceNaira).toLocaleString()}\n\n` +
+      `The same shop/products.json used by the website has been updated.`,
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [btn("📋 View Products", "website_shop_list")],
+            [btn("🛍️ Website Shop", "menu_website_shop"), btn("⭐ Website Reviews", "menu_website_reviews")],
+    [btn("👤 Website About", "menu_website_about")],
+            [btn("🏠 Main Menu", "menu_main")]
+          ]
+        }
+      }
+    );
+  } catch (e) {
+    console.error("Website shop PDF upload error:", e.message);
+
+    return bot.sendMessage(
+      msg.chat.id,
+      `❌ PDF upload failed.\n\n${e.message}`
+    );
+  }
+});
+
 // Test-email text continuation.
 const originalMessageHandler = null;
 bot.on("message", async msg => {
@@ -1168,6 +1949,8 @@ async function handleTelegramUpdate(req, res) {
   });
 }
 
+try { web3Automation.startScheduler(); console.log("Web3 automation scheduler started."); } catch (e) { console.error("Web3 automation scheduler failed to start:", e.message); }
+
 const server = http.createServer((req, res) => {
   if (req.method === "POST" && req.url === webhookPath) return handleTelegramUpdate(req, res);
   if (req.method === "GET" && req.url === "/") { res.writeHead(200, { "Content-Type": "text/plain" }); return res.end("Jabari Promoter is running."); }
@@ -1195,9 +1978,6 @@ server.listen(PORT, async () => {
     console.error("Startup data initialization failed:", e.message);
   }
 });
-
-
-try { web3Automation.startScheduler(); console.log("Web3 automation scheduler started."); } catch (e) { console.error("Web3 automation scheduler failed to start:", e.message); }
 
 
 process.on("unhandledRejection", e => console.error("Unhandled rejection:", e));
