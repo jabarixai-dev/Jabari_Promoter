@@ -1,0 +1,427 @@
+JABARI PROMOTER — TELEGRAM SHOP MANAGER PATCH
+================================================
+
+The GitHub connector cannot directly write this repository from the current connection, so this patch is prepared for the existing bot.js.
+
+1. Add this import near the existing websiteBlog import:
+
+const websiteShop = require("./lib/website/shop");
+
+
+2. In mainMenu(), add this row after the Website Blog row:
+
+[btn("🛍️ Website Shop", "menu_website_shop")],
+
+
+3. Insert the following functions immediately BEFORE:
+   async function showCampaignMenu(chatId, messageId) {
+
+
+async function showWebsiteShopMenu(chatId, messageId) {
+  const products = await websiteShop.listProducts();
+  const text = `🛍️ Website Shop
+
+Products in GitHub: ${products.length}
+
+This uses the same shop/products.json as the Jabari website.`;
+
+  const rows = [
+    [btn("📋 View Products", "website_shop_list")],
+    [btn("➕ New Product", "website_shop_create")],
+    [btn("🔄 Refresh", "menu_website_shop")],
+    [btn("⬅️ Back", "menu_main")]
+  ];
+
+  if (messageId) return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
+  return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: rows } });
+}
+
+async function showWebsiteShopList(chatId, messageId) {
+  const products = await websiteShop.listProducts();
+
+  if (!products.length) {
+    const kb = {
+      inline_keyboard: [
+        [btn("➕ New Product", "website_shop_create")],
+        [btn("⬅️ Back", "menu_website_shop")]
+      ]
+    };
+
+    const text = "📋 Website Shop\n\nNo products found.";
+
+    if (messageId) return safeEdit(chatId, messageId, text, kb);
+    return bot.sendMessage(chatId, text, { reply_markup: kb });
+  }
+
+  const rows = products.slice(0, 30).map(p => [
+    btn(
+      `${p.active === false ? "⚪" : "🟢"} ${p.title || "Untitled"} — ₦${Number(p.priceNaira || 0).toLocaleString()}`.slice(0, 60),
+      `website_shop_view:${p.slug}`
+    )
+  ]);
+
+  rows.push([btn("➕ New Product", "website_shop_create")]);
+  rows.push([btn("⬅️ Back", "menu_website_shop")]);
+
+  const text =
+    `📋 Website Shop\n\nShowing ${Math.min(products.length, 30)} of ${products.length} products.`;
+
+  if (messageId) return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
+  return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: rows } });
+}
+
+async function showWebsiteShopDetails(chatId, messageId, slug) {
+  const products = await websiteShop.listProducts();
+  const p = products.find(x => String(x.slug) === String(slug));
+
+  if (!p) throw new Error("Shop product not found.");
+
+  const text =
+    `🛍️ ${p.title}\n\n` +
+    `Price: ₦${Number(p.priceNaira || 0).toLocaleString()}\n` +
+    `Status: ${p.active === false ? "⚪ Inactive" : "🟢 Active"}\n` +
+    `PDF: ${p.file || "—"}\n\n` +
+    `${p.desc || ""}`;
+
+  const toggle = p.active === false ? "🟢 Activate" : "⚪ Deactivate";
+
+  const kb = {
+    inline_keyboard: [
+      [
+        btn("✏️ Edit", `website_shop_edit:${p.slug}`),
+        btn(toggle, `website_shop_toggle:${p.slug}`)
+      ],
+      [btn("🗑️ Delete", `website_shop_delete:${p.slug}`)],
+      [btn("⬅️ Back", "website_shop_list")]
+    ]
+  };
+
+  if (messageId) return safeEdit(chatId, messageId, text, kb);
+  return bot.sendMessage(chatId, text, { reply_markup: kb });
+}
+
+async function startWebsiteShopWizard(chatId, messageId, mode, product = null) {
+  inputState = {
+    chatId,
+    type: mode === "edit" ? "website_shop_edit" : "website_shop_create",
+    step: "title",
+    slug: product?.slug || "",
+    title: product?.title || "",
+    desc: product?.desc || "",
+    priceNaira: product?.priceNaira || "",
+    file: product?.file || ""
+  };
+
+  const heading =
+    mode === "edit"
+      ? "✏️ Edit Website Shop Product"
+      : "➕ New Website Shop Product";
+
+  const prompt =
+    mode === "edit"
+      ? `Current title:\n${product?.title || "Untitled"}\n\nEnter the new title.`
+      : "Enter the product title.";
+
+  return safeEdit(
+    chatId,
+    messageId,
+    `${heading}\n\n${prompt}`,
+    { inline_keyboard: [[btn("❌ Cancel", "website_shop_cancel")]] }
+  );
+}
+
+
+4. In the callback_query handler, immediately AFTER this existing line:
+
+if (data === "menu_website_blog") return showWebsiteBlogMenu(chatId, messageId);
+
+insert:
+
+if (data === "menu_website_shop") return showWebsiteShopMenu(chatId, messageId);
+
+if (data === "website_shop_list") return showWebsiteShopList(chatId, messageId);
+
+if (data === "website_shop_create") {
+  return startWebsiteShopWizard(chatId, messageId, "create");
+}
+
+if (data === "website_shop_cancel") {
+  inputState = null;
+  return showWebsiteShopMenu(chatId, messageId);
+}
+
+if (data === "website_shop_keep_pdf") {
+  if (
+    !inputState ||
+    inputState.chatId !== chatId ||
+    !["website_shop_create", "website_shop_edit"].includes(inputState.type)
+  ) {
+    return showWebsiteShopMenu(chatId, messageId);
+  }
+
+  if (inputState.type === "website_shop_create") {
+    return bot.sendMessage(chatId, "A new product requires a PDF. Please send the PDF.");
+  }
+
+  const s = inputState;
+
+  const p = await websiteShop.saveProduct({
+    slug: s.slug,
+    title: s.title,
+    desc: s.desc,
+    priceNaira: s.priceNaira,
+    file: s.file,
+    active: true
+  });
+
+  inputState = null;
+
+  return safeEdit(
+    chatId,
+    messageId,
+    `✅ Product updated.\n\n${p.title}`,
+    {
+      inline_keyboard: [
+        [btn("📋 View Products", "website_shop_list")],
+        [btn("🛍️ Website Shop", "menu_website_shop")],
+        [btn("🏠 Main Menu", "menu_main")]
+      ]
+    }
+  );
+}
+
+if (data.startsWith("website_shop_view:")) {
+  return showWebsiteShopDetails(
+    chatId,
+    messageId,
+    data.slice("website_shop_view:".length)
+  );
+}
+
+if (data.startsWith("website_shop_edit:")) {
+  const slug = data.slice("website_shop_edit:".length);
+  const products = await websiteShop.listProducts();
+  const p = products.find(x => x.slug === slug);
+
+  if (!p) throw new Error("Shop product not found.");
+
+  return startWebsiteShopWizard(chatId, messageId, "edit", p);
+}
+
+if (data.startsWith("website_shop_toggle:")) {
+  const slug = data.slice("website_shop_toggle:".length);
+
+  await websiteShop.toggleProduct(slug);
+
+  return showWebsiteShopDetails(chatId, messageId, slug);
+}
+
+if (data.startsWith("website_shop_delete:")) {
+  const slug = data.slice("website_shop_delete:".length);
+  const products = await websiteShop.listProducts();
+  const p = products.find(x => x.slug === slug);
+
+  if (!p) throw new Error("Shop product not found.");
+
+  return safeEdit(
+    chatId,
+    messageId,
+    `🗑️ Delete Shop Product\n\n${p.title}\n\nAre you sure?`,
+    {
+      inline_keyboard: [
+        [btn("🗑️ Yes, Delete", `website_shop_delete_yes:${slug}`)],
+        [btn("⬅️ Keep It", `website_shop_view:${slug}`)]
+      ]
+    }
+  );
+}
+
+if (data.startsWith("website_shop_delete_yes:")) {
+  await websiteShop.deleteProduct(
+    data.slice("website_shop_delete_yes:".length)
+  );
+
+  return showWebsiteShopList(chatId, messageId);
+}
+
+
+5. In the main text input handler, immediately BEFORE:
+
+if (s.type === "campaign_create" || s.type === "campaign_edit") {
+
+insert:
+
+if (s.type === "website_shop_create" || s.type === "website_shop_edit") {
+  if (s.step === "title") {
+    if (!msg.text.trim()) {
+      return bot.sendMessage(msg.chat.id, "Please enter a product title.");
+    }
+
+    s.title = msg.text.trim();
+    s.step = "desc";
+
+    return bot.sendMessage(
+      msg.chat.id,
+      "Enter the product description."
+    );
+  }
+
+  if (s.step === "desc") {
+    if (!msg.text.trim()) {
+      return bot.sendMessage(msg.chat.id, "Please enter a product description.");
+    }
+
+    s.desc = msg.text.trim();
+    s.step = "price";
+
+    return bot.sendMessage(
+      msg.chat.id,
+      "Enter the price in Nigerian Naira. Example: 1500"
+    );
+  }
+
+  if (s.step === "price") {
+    const price = Number(msg.text.replace(/[^0-9.]/g, ""));
+
+    if (!Number.isFinite(price) || price <= 0) {
+      return bot.sendMessage(
+        msg.chat.id,
+        "Please enter a valid price in Naira."
+      );
+    }
+
+    s.priceNaira = price;
+    s.step = "pdf";
+
+    return bot.sendMessage(
+      msg.chat.id,
+      s.type === "website_shop_edit"
+        ? "📄 Send a replacement PDF, or tap Keep Current PDF."
+        : "📄 Send the product PDF.",
+      {
+        reply_markup: {
+          inline_keyboard:
+            s.type === "website_shop_edit"
+              ? [
+                  [btn("📄 Keep Current PDF", "website_shop_keep_pdf")],
+                  [btn("❌ Cancel", "website_shop_cancel")]
+                ]
+              : [[btn("❌ Cancel", "website_shop_cancel")]]
+        }
+      }
+    );
+  }
+}
+
+
+6. Add this NEW document handler immediately BEFORE:
+
+// Test-email text continuation.
+
+bot.on("document", async msg => {
+  if (!isOwner(msg) || !inputState || inputState.chatId !== msg.chat.id) {
+    return;
+  }
+
+  const s = inputState;
+
+  if (
+    !["website_shop_create", "website_shop_edit"].includes(s.type) ||
+    s.step !== "pdf"
+  ) {
+    return;
+  }
+
+  const doc = msg.document;
+
+  if (!doc) return;
+
+  if (
+    String(doc.file_name || "").toLowerCase().slice(-4) !== ".pdf" ||
+    String(doc.mime_type || "").toLowerCase() !== "application/pdf"
+  ) {
+    return bot.sendMessage(msg.chat.id, "❌ Please send a PDF file.");
+  }
+
+  try {
+    await bot.sendMessage(
+      msg.chat.id,
+      "⏳ Uploading the PDF to the Jabari website…"
+    );
+
+    const fileUrl = await getTelegramFileLinkWithRetry(doc.file_id);
+    const buffer = await downloadBinary(fileUrl);
+
+    s.file = await websiteShop.uploadPdf(
+      buffer,
+      doc.file_name || "product.pdf"
+    );
+
+    const p = await websiteShop.saveProduct({
+      slug: s.slug,
+      title: s.title,
+      desc: s.desc,
+      priceNaira: s.priceNaira,
+      file: s.file,
+      active: true
+    });
+
+    inputState = null;
+
+    return bot.sendMessage(
+      msg.chat.id,
+      `✅ Shop product ${s.type === "website_shop_edit" ? "updated" : "created"}.\n\n` +
+      `${p.title}\n₦${Number(p.priceNaira).toLocaleString()}\n\n` +
+      `The same shop/products.json used by the website has been updated.`,
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [btn("📋 View Products", "website_shop_list")],
+            [btn("🛍️ Website Shop", "menu_website_shop")],
+            [btn("🏠 Main Menu", "menu_main")]
+          ]
+        }
+      }
+    );
+  } catch (e) {
+    console.error("Website shop PDF upload error:", e.message);
+
+    return bot.sendMessage(
+      msg.chat.id,
+      `❌ PDF upload failed.\n\n${e.message}`
+    );
+  }
+});
+
+
+7. Environment variables required in Render are the SAME GitHub variables already used by the bot:
+
+GITHUB_TOKEN
+GITHUB_OWNER=jabarixai-dev
+GITHUB_REPO=Jabari
+GITHUB_BRANCH=main
+
+No new database is required for Shop.
+
+8. Test order after adding the patch:
+
+Telegram → 🛍️ Website Shop
+→ View Products
+→ open an existing product
+→ Activate/Deactivate
+
+Then:
+
+→ New Product
+→ title
+→ description
+→ price
+→ PDF
+→ verify it appears in the website dashboard and public Shop.
+
+Then test Edit and Delete.
+
+IMPORTANT:
+Do not remove or replace the existing Blog code.
+Do not create another repository.
+Do not create another shop catalog.
