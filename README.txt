@@ -1,33 +1,16 @@
-JABARI PROMOTER — RESTORE WEBSITE BUTTONS + KEEP WEB3 AUTOMATION
+Jabari Web3 Automation — corrected replacement
 
-The deployed bot had Web3 Automation but the Website Home/About/Shop/Reviews buttons disappeared because the deployed bot.js was from a Web3-only integration and no longer contained the earlier website-management menu.
+Replace ONLY:
+Jabari_Promoter/web3-automation.js
 
-This bot.js restores:
-- Website Blog
-- Website Shop
-- Website Reviews
-- Website About
-- Website Home
-- Web3 Automation
-- Existing Campaigns, Contacts, Promote, Scanner, Status, Test Email
+This version:
+- resolves Google News RSS links to direct publisher URLs when possible
+- refuses to publish an opportunity if a direct publisher URL cannot be verified
+- creates substantially more detailed opportunity articles
+- creates natural news titles and removes "Web3 News Roundup"
+- keeps Google RSS redirect URLs out of generated opportunity articles
+- promotes using the Jabari blog URL, not the source URL
 
-IMPORTANT:
-1. Replace ONLY bot.js in jabarixai-dev/Jabari_Promoter with this bot.js.
-2. The root web3-automation.js is included too; replace it only if your existing root file is missing/different.
-3. Do not delete lib/website/.
-4. Do not change your existing Render environment variables.
-5. Keep JABARI_SITE_URL configured.
-6. Commit to main and let Render deploy.
-
-Expected root structure:
-Jabari_Promoter/
-  bot.js
-  web3-automation.js
-  lib/website/
-    blog.js
-    shop.js
-    reviews.js
-    about.js
-    home.js
-
-The website-management modules are already in the repository and are not removed by this fix.
+Important:
+The promotion email text itself is built in bot.js, not web3-automation.js.
+So this file does NOT by itself change the email wording. The email must be patched in bot.js so that the email contains only the Jabari blog URL.
