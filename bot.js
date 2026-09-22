@@ -976,8 +976,27 @@ async function finishPromotion(chatId) {
   if (!active) throw new Error("No active campaign.");
   if (!list.length) throw new Error("No contacts have been added yet.");
   const recipients = list.slice(0, PROMOTION_LIMIT);
-  const subject = `Jabari Promoter — ${active.title || "New Blog Post"}`;
-  const body = ["Hello,", "", "We would like to share a new blog post with you.", "", active.title, "", active.description, "", "Read the full post:", active.blog_url, "", "Best regards,", "Jabari Promoter"].join("\n");
+  const subject = `Worth a look: ${active.title || "A new opportunity from Jabari"}`;
+  const body = [
+    "Hi,",
+    "",
+    "I found something that may be worth your attention.",
+    "",
+    active.title || "New opportunity",
+    "",
+    active.description || "A new opportunity has been published on Jabari.",
+    "",
+    "If this is relevant to you, take a look now:",
+    active.blog_url,
+    "",
+    "Before you act, check the current eligibility, deadline, requirements and reward terms on the original source.",
+    "",
+    "Read the full breakdown:",
+    active.blog_url,
+    "",
+    "Best,",
+    "Jabari"
+  ].join("\n");
   const out = [];
   stats.totalRuns++;
   stats.lastRun = new Date().toISOString();
