@@ -737,6 +737,56 @@ async function sendEmail(to, subject, text) {
   }
 }
 
+
+function downloadBinary(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, res => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        return downloadBinary(res.headers.location).then(resolve).catch(reject);
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        return reject(new Error(`Telegram file download failed (HTTP ${res.statusCode}).`));
+      }
+
+      const chunks = [];
+      let total = 0;
+
+      res.on("data", chunk => {
+        total += chunk.length;
+        if (total > 8 * 1024 * 1024) {
+          res.destroy();
+          return reject(new Error("Image is too large. Please send a smaller image."));
+        }
+        chunks.push(chunk);
+      });
+
+      res.on("end", () => resolve(Buffer.concat(chunks)));
+      res.on("error", reject);
+    }).on("error", reject);
+  });
+}
+
+async function showWebsiteBlogPreview(chatId, state) {
+  const preview =
+    `📝 ${state.type === "website_blog_edit" ? "Edit" : "New"} Website Blog Post\n\n` +
+    `Title:\n${state.title}\n\n` +
+    `Content:\n${state.content.slice(0, 3000)}${state.content.length > 3000 ? "…" : ""}\n\n` +
+    `Image: ${state.image ? "Attached ✅" : "None"}\n\n` +
+    `Save this post to the Jabari website?`;
+
+  return bot.sendMessage(chatId, preview, {
+    reply_markup: {
+      inline_keyboard: [
+        [btn("✅ Save to Website", "website_blog_save")],
+        [btn("🔄 Start Again", "website_blog_restart")],
+        [btn("❌ Cancel", "website_blog_cancel")]
+      ]
+    }
+  });
+}
+
 // ----- Commands: kept as backups. Normal navigation uses buttons. -----
 bot.onText(/^\/start$/, async msg => {
   if (!isOwner(msg)) return deny(msg.chat.id);
@@ -766,7 +816,8 @@ bot.onText(/^\/testemail(?:\s+(.+))?$/i, async (msg, match) => {
 
 // ----- Text input flow -----
 bot.on("message", async msg => {
-  if (!isOwner(msg) || !msg.text || msg.text.startsWith("/") || !inputState || inputState.chatId !== msg.chat.id) return;
+  if (!isOwner(msg) || !inputState || inputState.chatId !== msg.chat.id) return;
+  if (!msg.text && !msg.photo) return;
   const s = inputState;
   try {
     if (s.type === "scan_website") {
@@ -805,31 +856,75 @@ bot.on("message", async msg => {
 
     if (s.type === "website_blog_create" || s.type === "website_blog_edit") {
       if (s.step === "title") {
+        if (!msg.text || msg.text.startsWith("/")) {
+          return bot.sendMessage(msg.chat.id, "Please enter a blog post title.");
+        }
+
         const title = msg.text.trim();
         if (!title) return bot.sendMessage(msg.chat.id, "Please enter a blog post title.");
+
         s.title = title;
         s.step = "content";
-        return bot.sendMessage(msg.chat.id, "Now send the blog post content.\n\nYou can use multiple paragraphs.");
+
+        return bot.sendMessage(
+          msg.chat.id,
+          "Now send the blog post content.\n\nYou can use multiple paragraphs."
+        );
       }
 
       if (s.step === "content") {
+        if (!msg.text || msg.text.startsWith("/")) {
+          return bot.sendMessage(msg.chat.id, "Please send the blog post content.");
+        }
+
         const content = msg.text;
-        if (!content.trim()) return bot.sendMessage(msg.chat.id, "Please enter the blog post content.");
+        if (!content.trim()) {
+          return bot.sendMessage(msg.chat.id, "Please enter the blog post content.");
+        }
+
         s.content = content;
-        const preview =
-          `📝 ${s.type === "website_blog_edit" ? "Edit" : "New"} Website Blog Post\n\n` +
-          `Title:\n${s.title}\n\n` +
-          `Content:\n${s.content.slice(0, 3000)}${s.content.length > 3000 ? "…" : ""}\n\n` +
-          `Save this post to the Jabari website?`;
-        return bot.sendMessage(msg.chat.id, preview, {
-          reply_markup: {
-            inline_keyboard: [
-              [btn("✅ Save to Website", "website_blog_save")],
-              [btn("🔄 Start Again", "website_blog_restart")],
-              [btn("❌ Cancel", "website_blog_cancel")]
-            ]
-          }
-        });
+        s.step = "image";
+
+        return bot.sendMessage(
+          msg.chat.id,
+          s.image
+            ? "🖼️ Send a new image for this post, or send /skip to keep the current image."
+            : "🖼️ Send an image for this post, or send /skip to continue without an image."
+        );
+      }
+
+      if (s.step === "image") {
+        if (msg.text && msg.text.trim().toLowerCase() === "/skip") {
+          return showWebsiteBlogPreview(msg.chat.id, s);
+        }
+
+        if (!msg.photo || !msg.photo.length) {
+          return bot.sendMessage(
+            msg.chat.id,
+            "Please send an image, or send /skip to continue without an image."
+          );
+        }
+
+        try {
+          // Telegram sends several photo sizes. Use the largest available one.
+          const photo = msg.photo[msg.photo.length - 1];
+
+          const fileUrl = await bot.getFileLink(photo.file_id);
+          const imageBuffer = await downloadBinary(fileUrl);
+
+          s.image = await websiteBlog.uploadImage(
+            imageBuffer,
+            "telegram-image.jpg"
+          );
+
+          return showWebsiteBlogPreview(msg.chat.id, s);
+        } catch (e) {
+          console.error("Website blog image upload error:", e.message);
+          return bot.sendMessage(
+            msg.chat.id,
+            `❌ Image upload failed.\n\n${e.message}`
+          );
+        }
       }
     }
 
@@ -1048,18 +1143,12 @@ bot.on("callback_query", async q => {
       return bot.sendMessage(chatId, `✅ Promotion complete.\n\nSent: ${sent}\nFailed: ${failed}\nProcessed: ${out.length}`, { reply_markup: { inline_keyboard: [[btn("📊 Status", "menu_status")], [btn("🏠 Main Menu", "menu_main")]] } });
     }
 
-   if (data === "menu_testemail") {
-  inputState = { chatId, type: "test_email", step: "email" };
-  return safeEdit(chatId, messageId, "🧪 Test Email\n\nSend the email address where you want the test sent.", {
-    inline_keyboard: [[btn("❌ Cancel", "testemail_cancel")]]
-  });
-}
-
-if (data === "testemail_cancel") {
-  inputState = null;
-  return showMain(chatId, messageId);
-}
-
+    if (data === "menu_testemail") {
+      inputState = { chatId, type: "test_email", step: "email" };
+      await safeEdit(chatId, messageId, "🧪 Test Email\n\nEnter the email address where you want the test sent.", { inline_keyboard: [[btn("❌ Cancel", "testemail_cancel")]] });
+      return bot.sendMessage(chatId, "Email address:", { reply_markup: { force_reply: true } });
+    }
+    if (data === "testemail_cancel") { inputState = null; return showMain(chatId, messageId); }
   } catch (e) {
     console.error("Callback error:", e.message);
     await bot.sendMessage(chatId, `Action failed.\n\n${e.message}`);
