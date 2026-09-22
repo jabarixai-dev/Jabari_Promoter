@@ -8,6 +8,7 @@ const { createClient } = require("@supabase/supabase-js");
 const websiteBlog = require("./lib/website/blog");
 const websiteShop = require("./lib/website/shop");
 const websiteReviews = require("./lib/website/reviews");
+const websiteAbout = require("./lib/website/about");
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const ownerId = String(process.env.BOT_OWNER_ID || "");
@@ -417,6 +418,7 @@ function mainMenu() {
   return menu([
     [btn("📝 Campaigns", "menu_campaigns"), btn("🌐 Website Blog", "menu_website_blog")],
     [btn("🛍️ Website Shop", "menu_website_shop"), btn("⭐ Website Reviews", "menu_website_reviews")],
+    [btn("👤 Website About", "menu_website_about")],
     [btn("👥 Contacts", "menu_contacts"), btn("📧 Promote", "menu_promote")],
     [btn("🕵️ Email Scanner", "menu_scanner"), btn("📊 Status", "menu_status")],
     [btn("🧪 Test Email", "menu_testemail")]
@@ -660,6 +662,46 @@ async function showWebsiteReviewDetails(chatId, messageId, id) {
   ];
   if (messageId) return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
   return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: rows } });
+}
+
+
+async function showWebsiteAboutMenu(chatId, messageId) {
+  const about = await websiteAbout.getAbout();
+  const text = `👤 Website About\n\nBio:\n${about.bio}\n\nServices:\n${about.services.map((s, i) => `${i + 1}. ${s.title}\n${s.description}`).join("\n\n")}\n\nThis uses the same about/content.json as the Jabari website.`;
+  const rows = [
+    [btn("✏️ Edit About", "website_about_edit")],
+    [btn("🔄 Refresh", "menu_website_about")],
+    [btn("⬅️ Back", "menu_main")]
+  ];
+  if (messageId) return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
+  return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: rows } });
+}
+
+async function startWebsiteAboutWizard(chatId, messageId) {
+  const about = await websiteAbout.getAbout();
+  inputState = {
+    chatId,
+    type: "website_about_edit",
+    step: "bio",
+    bio: about.bio,
+    services: about.services.map(s => ({ title: s.title, description: s.description }))
+  };
+  return safeEdit(chatId, messageId,
+    `✏️ Edit Website About\n\nCurrent bio:\n${about.bio}\n\nSend the new bio.`,
+    { inline_keyboard: [[btn("❌ Cancel", "website_about_cancel")]] }
+  );
+}
+
+async function showWebsiteAboutPreview(chatId, messageId) {
+  const s = inputState;
+  const text = `👤 About Preview\n\nBio:\n${s.bio}\n\n${s.services.map((x, i) => `${i + 1}. ${x.title}\n${x.description}`).join("\n\n")}\n\nSave these changes to the website?`;
+  return safeEdit(chatId, messageId, text, {
+    inline_keyboard: [
+      [btn("✅ Save to Website", "website_about_save")],
+      [btn("🔄 Start Again", "website_about_edit")],
+      [btn("❌ Cancel", "website_about_cancel")]
+    ]
+  });
 }
 
 
@@ -1076,6 +1118,53 @@ if (s.type === "website_shop_create" || s.type === "website_shop_edit") {
       return bot.sendMessage(msg.chat.id, "✅ Reply saved to the website.", { reply_markup: { inline_keyboard: [[btn("⭐ Review", `website_review_view:${s.id}`)], [btn("📋 Reviews", "website_reviews_list")], [btn("🏠 Main Menu", "menu_main")]] } });
     }
 
+    if (s.type === "website_about_edit") {
+      if (s.step === "bio") {
+        const bio = msg.text.trim();
+        if (!bio) return bot.sendMessage(msg.chat.id, "Please enter the About bio.");
+        s.bio = bio; s.step = "service1_title";
+        return bot.sendMessage(msg.chat.id, "Service 1 of 3\n\nEnter the service title.\n\nExample: Website Design");
+      }
+      if (s.step === "service1_title") {
+        const title = msg.text.trim();
+        if (!title) return bot.sendMessage(msg.chat.id, "Please enter the service title.");
+        s.services[0].title = title; s.step = "service1_desc";
+        return bot.sendMessage(msg.chat.id, "Now enter the description for Service 1.");
+      }
+      if (s.step === "service1_desc") {
+        const value = msg.text.trim();
+        if (!value) return bot.sendMessage(msg.chat.id, "Please enter the service description.");
+        s.services[0].description = value; s.step = "service2_title";
+        return bot.sendMessage(msg.chat.id, "Service 2 of 3\n\nEnter the service title.");
+      }
+      if (s.step === "service2_title") {
+        const title = msg.text.trim();
+        if (!title) return bot.sendMessage(msg.chat.id, "Please enter the service title.");
+        s.services[1].title = title; s.step = "service2_desc";
+        return bot.sendMessage(msg.chat.id, "Now enter the description for Service 2.");
+      }
+      if (s.step === "service2_desc") {
+        const value = msg.text.trim();
+        if (!value) return bot.sendMessage(msg.chat.id, "Please enter the service description.");
+        s.services[1].description = value; s.step = "service3_title";
+        return bot.sendMessage(msg.chat.id, "Service 3 of 3\n\nEnter the service title.");
+      }
+      if (s.step === "service3_title") {
+        const title = msg.text.trim();
+        if (!title) return bot.sendMessage(msg.chat.id, "Please enter the service title.");
+        s.services[2].title = title; s.step = "service3_desc";
+        return bot.sendMessage(msg.chat.id, "Now enter the description for Service 3.");
+      }
+      if (s.step === "service3_desc") {
+        const value = msg.text.trim();
+        if (!value) return bot.sendMessage(msg.chat.id, "Please enter the service description.");
+        s.services[2].description = value; s.step = "preview";
+        return bot.sendMessage(msg.chat.id, `👤 About Preview\n\nBio:\n${s.bio}\n\n${s.services.map((x, i) => `${i + 1}. ${x.title}\n${x.description}`).join("\n\n")}\n\nSave these changes to the website?`, {
+          reply_markup: { inline_keyboard: [[btn("✅ Save to Website", "website_about_save")], [btn("🔄 Start Again", "website_about_edit")], [btn("❌ Cancel", "website_about_cancel")]] }
+        });
+      }
+    }
+
     if (s.type === "campaign_create" || s.type === "campaign_edit") {
       if (s.step === "title") {
         if (!msg.text.trim()) return bot.sendMessage(msg.chat.id, "Please enter a campaign title.");
@@ -1125,6 +1214,23 @@ bot.on("callback_query", async q => {
     if (data === "menu_campaigns") return showCampaignMenu(chatId, messageId);
     if (data === "menu_website_blog") return showWebsiteBlogMenu(chatId, messageId);
     if (data === "menu_website_shop") return showWebsiteShopMenu(chatId, messageId);
+
+    if (data === "menu_website_about") return showWebsiteAboutMenu(chatId, messageId);
+    if (data === "website_about_edit") {
+      return startWebsiteAboutWizard(chatId, messageId);
+    }
+    if (data === "website_about_cancel") {
+      inputState = null;
+      return showWebsiteAboutMenu(chatId, messageId);
+    }
+    if (data === "website_about_save") {
+      if (!inputState || inputState.chatId !== chatId || inputState.type !== "website_about_edit") return showWebsiteAboutMenu(chatId, messageId);
+      const s = inputState;
+      await safeEdit(chatId, messageId, "⏳ Saving About content to the Jabari website GitHub repository...");
+      const about = await websiteAbout.saveAbout({ bio: s.bio, services: s.services });
+      inputState = null;
+      return safeEdit(chatId, messageId, `✅ Website About updated.\n\nThe same about/content.json used by your Jabari website has been updated.`, { inline_keyboard: [[btn("👤 Website About", "menu_website_about")], [btn("🏠 Main Menu", "menu_main")]] });
+    }
 
     if (data === "menu_website_reviews") return showWebsiteReviewsMenu(chatId, messageId);
     if (data === "website_reviews_list") return showWebsiteReviewsList(chatId, messageId);
@@ -1210,6 +1316,7 @@ bot.on("callback_query", async q => {
           inline_keyboard: [
             [btn("📋 View Products", "website_shop_list")],
             [btn("🛍️ Website Shop", "menu_website_shop"), btn("⭐ Website Reviews", "menu_website_reviews")],
+    [btn("👤 Website About", "menu_website_about")],
             [btn("🏠 Main Menu", "menu_main")]
           ]
         }
@@ -1509,6 +1616,7 @@ bot.on("document", async msg => {
           inline_keyboard: [
             [btn("📋 View Products", "website_shop_list")],
             [btn("🛍️ Website Shop", "menu_website_shop"), btn("⭐ Website Reviews", "menu_website_reviews")],
+    [btn("👤 Website About", "menu_website_about")],
             [btn("🏠 Main Menu", "menu_main")]
           ]
         }
