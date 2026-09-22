@@ -1,0 +1,31 @@
+TELEGRAM REVIEWS MANAGER
+
+Replace your current bot.js with this bot.js.
+Add lib/website/reviews.js.
+
+The manager uses the same GitHub file as the website:
+reviews/reviews.json
+
+Existing Shop, Blog, Contacts, Campaigns, Scanner and Test Email functionality is preserved.
+
+Required existing environment variables:
+GITHUB_TOKEN
+GITHUB_OWNER=jabarixai-dev
+GITHUB_REPO=Jabari
+GITHUB_BRANCH=main
+
+No new environment variables are required.
+
+Telegram menu:
+⭐ Website Reviews
+
+Actions:
+- View Reviews
+- Approve
+- Hide
+- Reply / Edit Reply
+- Delete Reply
+- Delete Review
+- Refresh
+
+Deploy Render after uploading the files, then open Telegram and use ⭐ Website Reviews.

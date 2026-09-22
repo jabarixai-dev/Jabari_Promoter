@@ -7,6 +7,7 @@ const TelegramBot = require("node-telegram-bot-api");
 const { createClient } = require("@supabase/supabase-js");
 const websiteBlog = require("./lib/website/blog");
 const websiteShop = require("./lib/website/shop");
+const websiteReviews = require("./lib/website/reviews");
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const ownerId = String(process.env.BOT_OWNER_ID || "");
@@ -415,7 +416,7 @@ function mainMenuText() {
 function mainMenu() {
   return menu([
     [btn("📝 Campaigns", "menu_campaigns"), btn("🌐 Website Blog", "menu_website_blog")],
-    [btn("🛍️ Website Shop", "menu_website_shop")],
+    [btn("🛍️ Website Shop", "menu_website_shop"), btn("⭐ Website Reviews", "menu_website_reviews")],
     [btn("👥 Contacts", "menu_contacts"), btn("📧 Promote", "menu_promote")],
     [btn("🕵️ Email Scanner", "menu_scanner"), btn("📊 Status", "menu_status")],
     [btn("🧪 Test Email", "menu_testemail")]
@@ -604,6 +605,61 @@ async function startWebsiteShopWizard(chatId, messageId, mode, product = null) {
     `${heading}\n\n${prompt}`,
     { inline_keyboard: [[btn("❌ Cancel", "website_shop_cancel")]] }
   );
+}
+
+
+async function showWebsiteReviewsMenu(chatId, messageId) {
+  const reviews = await websiteReviews.listReviews();
+  const pending = reviews.filter(r => r.status !== 'hidden').length;
+  const hidden = reviews.filter(r => r.status === 'hidden').length;
+  const text = `⭐ Website Reviews\n\nTotal: ${reviews.length}\nVisible: ${pending}\nHidden: ${hidden}\n\nThis uses the same reviews/reviews.json as the Jabari website.`;
+  const rows = [
+    [btn("📋 View Reviews", "website_reviews_list")],
+    [btn("🔄 Refresh", "menu_website_reviews")],
+    [btn("⬅️ Back", "menu_main")]
+  ];
+  if (messageId) return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
+  return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: rows } });
+}
+
+async function showWebsiteReviewsList(chatId, messageId) {
+  const reviews = await websiteReviews.listReviews();
+  if (!reviews.length) {
+    const kb = { inline_keyboard: [[btn("🔄 Refresh", "menu_website_reviews")], [btn("⬅️ Back", "menu_website_reviews")]] };
+    const text = "📋 Website Reviews\n\nNo reviews found.";
+    if (messageId) return safeEdit(chatId, messageId, text, kb);
+    return bot.sendMessage(chatId, text, { reply_markup: kb });
+  }
+  const rows = reviews.slice(0, 30).map(r => {
+    const stars = '★'.repeat(Math.max(0, Math.min(5, Number(r.rating) || 0)));
+    const status = r.status === 'hidden' ? '⚪' : '🟢';
+    return [btn(`${status} ${stars || '—'} ${String(r.name || 'Anonymous').slice(0, 30)}`.slice(0, 60), `website_review_view:${r.id}`)];
+  });
+  rows.push([btn("🔄 Refresh", "menu_website_reviews")]);
+  rows.push([btn("⬅️ Back", "menu_website_reviews")]);
+  const text = `📋 Website Reviews\n\nShowing ${Math.min(reviews.length, 30)} of ${reviews.length} reviews.`;
+  if (messageId) return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
+  return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: rows } });
+}
+
+async function showWebsiteReviewDetails(chatId, messageId, id) {
+  const reviews = await websiteReviews.listReviews();
+  const r = reviews.find(x => String(x.id) === String(id));
+  if (!r) throw new Error("Review not found.");
+  const stars = '★'.repeat(Math.max(0, Math.min(5, Number(r.rating) || 0))) + '☆'.repeat(Math.max(0, 5 - Math.min(5, Number(r.rating) || 0)));
+  const date = r.createdAt ? new Date(r.createdAt).toLocaleString() : '—';
+  const text = `⭐ Website Review\n\n${r.name || 'Anonymous'}\n${stars}\n\n${r.message || ''}\n\nStatus: ${r.status === 'hidden' ? '⚪ Hidden' : '🟢 Visible'}\nDate: ${date}\n\n${r.reply ? `Jabari reply:\n${r.reply}` : 'No reply yet.'}`;
+  const statusButton = r.status === 'hidden'
+    ? btn("✅ Approve", `website_review_approve:${r.id}`)
+    : btn("👁️ Hide", `website_review_hide:${r.id}`);
+  const rows = [
+    [statusButton, btn(r.reply ? "✏️ Edit Reply" : "💬 Reply", `website_review_reply:${r.id}`)],
+    ...(r.reply ? [[btn("🗑️ Delete Reply", `website_review_delete_reply:${r.id}`)]] : []),
+    [btn("❌ Delete Review", `website_review_delete:${r.id}`)],
+    [btn("⬅️ Back", "website_reviews_list")]
+  ];
+  if (messageId) return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
+  return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: rows } });
 }
 
 
@@ -1011,6 +1067,15 @@ if (s.type === "website_shop_create" || s.type === "website_shop_edit") {
   }
 }
 
+
+    if (s.type === "website_review_reply") {
+      const reply = msg.text.trim();
+      if (!reply) return bot.sendMessage(msg.chat.id, "Please enter a reply, or tap Cancel.");
+      await websiteReviews.setReply(s.id, reply);
+      inputState = null;
+      return bot.sendMessage(msg.chat.id, "✅ Reply saved to the website.", { reply_markup: { inline_keyboard: [[btn("⭐ Review", `website_review_view:${s.id}`)], [btn("📋 Reviews", "website_reviews_list")], [btn("🏠 Main Menu", "menu_main")]] } });
+    }
+
     if (s.type === "campaign_create" || s.type === "campaign_edit") {
       if (s.step === "title") {
         if (!msg.text.trim()) return bot.sendMessage(msg.chat.id, "Please enter a campaign title.");
@@ -1060,6 +1125,45 @@ bot.on("callback_query", async q => {
     if (data === "menu_campaigns") return showCampaignMenu(chatId, messageId);
     if (data === "menu_website_blog") return showWebsiteBlogMenu(chatId, messageId);
     if (data === "menu_website_shop") return showWebsiteShopMenu(chatId, messageId);
+
+    if (data === "menu_website_reviews") return showWebsiteReviewsMenu(chatId, messageId);
+    if (data === "website_reviews_list") return showWebsiteReviewsList(chatId, messageId);
+    if (data.startsWith("website_review_view:")) return showWebsiteReviewDetails(chatId, messageId, data.slice("website_review_view:".length));
+    if (data.startsWith("website_review_approve:")) {
+      const id = data.slice("website_review_approve:".length);
+      await websiteReviews.setStatus(id, "approved");
+      return showWebsiteReviewDetails(chatId, messageId, id);
+    }
+    if (data.startsWith("website_review_hide:")) {
+      const id = data.slice("website_review_hide:".length);
+      await websiteReviews.setStatus(id, "hidden");
+      return showWebsiteReviewDetails(chatId, messageId, id);
+    }
+    if (data.startsWith("website_review_reply:")) {
+      const id = data.slice("website_review_reply:".length);
+      const reviews = await websiteReviews.listReviews();
+      const r = reviews.find(x => String(x.id) === String(id));
+      if (!r) throw new Error("Review not found.");
+      inputState = { chatId, type: "website_review_reply", step: "reply", id, existing: r.reply || "" };
+      return safeEdit(chatId, messageId, `💬 Reply to ${r.name || "Anonymous"}\n\nCurrent reply:\n${r.reply || "(none)"}\n\nSend the new reply as your next message.`, { inline_keyboard: [[btn("❌ Cancel", `website_review_view:${id}`)]] });
+    }
+    if (data.startsWith("website_review_delete_reply:")) {
+      const id = data.slice("website_review_delete_reply:".length);
+      await websiteReviews.deleteReply(id);
+      return showWebsiteReviewDetails(chatId, messageId, id);
+    }
+    if (data.startsWith("website_review_delete:")) {
+      const id = data.slice("website_review_delete:".length);
+      const reviews = await websiteReviews.listReviews();
+      const r = reviews.find(x => String(x.id) === String(id));
+      if (!r) throw new Error("Review not found.");
+      return safeEdit(chatId, messageId, `❌ Delete Review\n\n${r.name || "Anonymous"}\n\n${String(r.message || "").slice(0, 500)}\n\nAre you sure?`, { inline_keyboard: [[btn("❌ Yes, Delete", `website_review_delete_yes:${id}`)], [btn("⬅️ Keep It", `website_review_view:${id}`)]] });
+    }
+    if (data.startsWith("website_review_delete_yes:")) {
+      await websiteReviews.deleteReview(data.slice("website_review_delete_yes:".length));
+      return showWebsiteReviewsList(chatId, messageId);
+    }
+
     
     if (data === "website_shop_list") return showWebsiteShopList(chatId, messageId);
     
@@ -1105,7 +1209,7 @@ bot.on("callback_query", async q => {
         {
           inline_keyboard: [
             [btn("📋 View Products", "website_shop_list")],
-            [btn("🛍️ Website Shop", "menu_website_shop")],
+            [btn("🛍️ Website Shop", "menu_website_shop"), btn("⭐ Website Reviews", "menu_website_reviews")],
             [btn("🏠 Main Menu", "menu_main")]
           ]
         }
@@ -1404,7 +1508,7 @@ bot.on("document", async msg => {
         reply_markup: {
           inline_keyboard: [
             [btn("📋 View Products", "website_shop_list")],
-            [btn("🛍️ Website Shop", "menu_website_shop")],
+            [btn("🛍️ Website Shop", "menu_website_shop"), btn("⭐ Website Reviews", "menu_website_reviews")],
             [btn("🏠 Main Menu", "menu_main")]
           ]
         }
