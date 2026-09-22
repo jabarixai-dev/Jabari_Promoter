@@ -19,11 +19,18 @@ const NEWS_FEEDS = [
   'https://news.google.com/rss/search?q=DeFi+crypto+Web3&hl=en-US&gl=US&ceid=US:en'
 ];
 
+const OPPORTUNITY_SOURCES = [
+  { name:'Gitcoin', url:'https://gitcoin.co/campaigns', type:'money_making', allowedHosts:['gitcoin.co'], match:/\/campaigns?\//i },
+  { name:'Immunefi', url:'https://immunefi.com/bug-bounty/', type:'bounty', allowedHosts:['immunefi.com'], match:/\/bug-bounty\/[^/?#]+/i },
+  { name:'Galxe', url:'https://app.galxe.com/quest/explore/all', type:'alpha', allowedHosts:['app.galxe.com','galxe.com'], match:/\/quest\/[^/?#]+\/[^/?#]+/i },
+  { name:'DoraHacks', url:'https://dorahacks.io/', type:'bounty', allowedHosts:['dorahacks.io'], match:/(bounty|hackathon|buidl|grant)/i }
+];
+
 const OPPORTUNITY_FEEDS = [
   'https://news.google.com/rss/search?q=Web3+bounty+OR+crypto+bounty&hl=en-US&gl=US&ceid=US:en',
   'https://news.google.com/rss/search?q=Web3+alpha+OR+crypto+airdrop+opportunity&hl=en-US&gl=US&ceid=US:en',
-  'https://news.google.com/rss/search?q=Web3+quest+reward+OR+blockchain+hackathon+bounty&hl=en-US&gl=US&ceid=US:en',
-  'https://news.google.com/rss/search?q=Web3+earn+opportunity+OR+crypto+grant&hl=en-US&gl=US&ceid=US:en'
+  'https://news.google.com/rss/search?q=Web3+quest+reward+OR+blockchain+hackathon+bounty&hl=en-US&gl=US:en',
+  'https://news.google.com/rss/search?q=Web3+earn+opportunity+OR+crypto+grant&hl=en-US&gl=US:en'
 ];
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
@@ -185,21 +192,47 @@ async function fetchFeeds(feeds) {
   });
 }
 
+function sourceHostAllowed(url, source) {
+  try { const host=new URL(url).hostname.toLowerCase(); return source.allowedHosts.some(h=>host===h||host.endsWith('.'+h)); }
+  catch (_) { return false; }
+}
+function sourceTitleFromUrl(url, fallback) {
+  try { const x=new URL(url).pathname.split('/').filter(Boolean).pop()||''; const t=decodeURIComponent(x).replace(/[-_]+/g,' ').trim(); return t.length>3?t.replace(/\b\w/g,m=>m.toUpperCase()).slice(0,300):fallback; } catch (_) { return fallback; }
+}
+function extractAnchors(html, baseUrl) {
+  const out=[]; const re=/<a\b([^>]*?)href\s*=\s*["']([^"']+)["']([^>]*)>([\s\S]*?)<\/a>/gi; let m;
+  while((m=re.exec(String(html||'')))) { try { const url=new URL(m[2],baseUrl).href; const attrs=(m[1]||'')+' '+(m[3]||''); out.push({url,text:cleanText(m[4]||''),label:(attrs.match(/(?:aria-label|title)\s*=\s*["']([^"']+)["']/i)||[])[1]||''}); } catch(_){} }
+  return out;
+}
+function sourceCandidate(anchor, source) {
+  if(!sourceHostAllowed(anchor.url,source)) return null;
+  if(!source.match.test(anchor.url) && !source.match.test((anchor.text||'')+' '+(anchor.label||''))) return null;
+  if(anchor.url===source.url) return null;
+  const title=cleanText(anchor.label||anchor.text)||sourceTitleFromUrl(anchor.url,source.name+' opportunity');
+  if(/^(login|sign up|sign in|privacy|terms|docs|about|contact|home|search|settings)$/i.test(title)) return null;
+  let type=source.type; const text=(title+' '+anchor.url).toLowerCase();
+  if(source.name==='DoraHacks' && /grant/.test(text)) type='money_making';
+  return {opportunity_type:type,title:title.slice(0,300),summary:(anchor.text||anchor.label||title).slice(0,1600),source_url:anchor.url,source_name:source.name};
+}
+async function discoverPrimarySource(source) {
+  try { const page=await fetchSourcePage(source.url); const map=new Map(); for(const a of extractAnchors(page.html,page.url||source.url)){ const x=sourceCandidate(a,source); if(x&&!map.has(x.source_url)) map.set(x.source_url,x); if(map.size>=30) break; } return {source:source.name,candidates:[...map.values()],error:null}; }
+  catch(e){ console.error('Primary opportunity source failed: '+source.name,e.message); return {source:source.name,candidates:[],error:e.message}; }
+}
+async function fetchPrimaryOpportunityCandidates(){ const out=[]; for(const s of OPPORTUNITY_SOURCES) out.push(await discoverPrimarySource(s)); return out; }
+async function fetchSecondaryOpportunityCandidates(){ return (await fetchFeeds(OPPORTUNITY_FEEDS)).map(x=>({...x,secondary:true})); }
+function isTrustedOpportunityUrl(url){ try { return OPPORTUNITY_SOURCES.some(s=>sourceHostAllowed(url,s)); } catch(_){ return false; } }
+
 function classifyOpportunity(item) {
-  const text = `${item.title} ${item.description}`.toLowerCase();
-  if (/bounty|hackathon|bug bounty/.test(text)) return 'bounty';
-  if (/alpha|airdrop|early access|testnet|quest|campaign|points/.test(text)) return 'alpha';
-  if (/grant|earn|reward|funding|opportunity|income/.test(text)) return 'money_making';
+  const text=String(item.title||'')+' '+String(item.description||item.summary||''); const lower=text.toLowerCase();
+  if(item.opportunity_type) return item.opportunity_type;
+  if(/bounty|hackathon|bug bounty/.test(lower)) return 'bounty';
+  if(/alpha|airdrop|early access|testnet|quest|campaign|points/.test(lower)) return 'alpha';
+  if(/grant|earn|reward|funding|opportunity|income/.test(lower)) return 'money_making';
   return null;
 }
-
 function looksUsefulOpportunity(item) {
-  const text = `${item.title} ${item.description}`.toLowerCase();
-  const bad = [
-    'casino', 'gambling', 'sportsbook', 'porn', 'adult', 'phishing',
-    'malware', 'ransomware', 'steal your', 'guaranteed profit', '100% profit'
-  ];
-  return !bad.some(term => text.includes(term)) && item.link.startsWith('http');
+  const text=(String(item.title||'')+' '+String(item.description||item.summary||'')).toLowerCase();
+  return !['casino','gambling','sportsbook','porn','adult','phishing','malware','ransomware','guaranteed profit','100% profit'].some(x=>text.includes(x));
 }
 
 function fingerprint(item, type, directUrl = '') {
@@ -245,52 +278,38 @@ async function updateRun(id, patch) {
 }
 
 async function discoverOpportunities() {
-  const run = await logRun('opportunity_discovery', 'started', { started_at: new Date().toISOString() });
+  const run=await logRun('opportunity_discovery','started',{started_at:new Date().toISOString()});
   try {
-    const items = await fetchFeeds(OPPORTUNITY_FEEDS);
-    let stored = 0;
-    const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
-
-    for (const item of items) {
-      const type = classifyOpportunity(item);
-      if (!type || !looksUsefulOpportunity(item)) continue;
-      const publishedTime = Date.parse(item.pubDate || '') || Date.now();
-      if (publishedTime < cutoff) continue;
-
-      const directUrl = await resolveSourceUrl(item.link);
-      if (!directUrl) {
-        console.log('Skipping opportunity because a direct publisher URL could not be resolved:', item.title);
-        continue;
-      }
-
-      const fp = fingerprint(item, type, directUrl);
-      const row = {
-        opportunity_type: type,
-        title: item.title.slice(0, 300),
-        summary: item.description.slice(0, 1200),
-        content: `Source: ${item.source || 'Web3 source'}\n\n${item.description || item.title}`,
-        source_url: directUrl,
-        source_name: item.source || 'Web3 source',
-        discovered_at: new Date().toISOString(),
-        fingerprint: fp,
-        status: 'verified'
-      };
-
-      const { error } = await supabase.from('promoter_opportunities').insert(row);
-      if (!error) stored++;
-      else if (error.code !== '23505') console.error('Opportunity store failed:', error.message);
+    const sourceResults=await fetchPrimaryOpportunityCandidates();
+    const primary=sourceResults.flatMap(x=>x.candidates);
+    const secondary=await fetchSecondaryOpportunityCandidates();
+    const combined=[...primary,...secondary]; const unique=new Map();
+    for(const item of combined){ const type=classifyOpportunity(item); const url=String(item.source_url||item.link||'').trim(); if(!type||!url||!looksUsefulOpportunity(item)) continue; try{const u=new URL(url).href; const k=type+'|'+u.toLowerCase(); if(!unique.has(k)) unique.set(k,{...item,opportunity_type:type,source_url:u});}catch(_){} }
+    const candidates=[...unique.values()];
+    const fps=candidates.map(x=>fingerprint({title:x.title,link:x.source_url},x.opportunity_type,x.source_url));
+    let known=new Set();
+    if(fps.length){ const {data,error}=await supabase.from('promoter_opportunities').select('fingerprint').in('fingerprint',fps); if(error) throw error; known=new Set((data||[]).map(x=>x.fingerprint)); }
+    const stats={sourcesChecked:OPPORTUNITY_SOURCES.length,sourceCandidates:Object.fromEntries(sourceResults.map(x=>[x.source,x.candidates.length])),primaryCandidates:primary.length,secondaryCandidates:secondary.length,totalCandidates:candidates.length,alreadyKnown:0,rejected:0,needsVerification:0,verifiedStored:0};
+    let verified=0;
+    for(const item of candidates){
+      const fp=fingerprint({title:item.title,link:item.source_url},item.opportunity_type,item.source_url);
+      if(known.has(fp)){stats.alreadyKnown++;continue;}
+      const primaryItem=!item.secondary&&OPPORTUNITY_SOURCES.some(s=>s.name===item.source_name&&sourceHostAllowed(item.source_url,s));
+      if(!primaryItem){stats.needsVerification++;continue;}
+      if(verified>=32){stats.needsVerification++;continue;}
+      try{
+        const page=await fetchSourcePage(item.source_url); const direct=page.url||item.source_url;
+        if(!isTrustedOpportunityUrl(direct)){stats.rejected++;continue;}
+        const text=htmlToReadableText(page.html).slice(0,18000); if(text.length<120){stats.needsVerification++;continue;}
+        const row={opportunity_type:item.opportunity_type,title:item.title,summary:cleanText(item.summary||text).slice(0,1600),content:'Source: '+item.source_name+'\n\n'+text.slice(0,7000),source_url:direct,source_name:item.source_name,discovered_at:new Date().toISOString(),fingerprint:fp,status:'verified'};
+        const {error}=await supabase.from('promoter_opportunities').insert(row);
+        if(!error){stats.verifiedStored++;verified++;} else if(error.code==='23505') stats.alreadyKnown++; else stats.needsVerification++;
+      }catch(e){console.error('Opportunity verification failed:',e.message);stats.needsVerification++;}
     }
-
-    await updateRun(run?.id, {
-      status: 'completed', completed_at: new Date().toISOString(),
-      items_found: items.length, items_published: 0, items_promoted: 0,
-      message: `Stored ${stored} new opportunities with direct publisher URLs.`
-    });
-    return { found: items.length, stored };
-  } catch (e) {
-    await updateRun(run?.id, { status: 'failed', completed_at: new Date().toISOString(), message: e.message });
-    throw e;
-  }
+    const message=['Sources checked: '+stats.sourcesChecked,...Object.entries(stats.sourceCandidates).map(([n,v])=>n+': '+v+' candidates'),'Primary candidates: '+stats.primaryCandidates,'Secondary leads: '+stats.secondaryCandidates,'Already known: '+stats.alreadyKnown,'Rejected: '+stats.rejected,'Needs verification: '+stats.needsVerification,'Verified & stored: '+stats.verifiedStored].join('\n');
+    await updateRun(run?.id,{status:'completed',completed_at:new Date().toISOString(),items_found:stats.totalCandidates,items_published:0,items_promoted:0,message});
+    return {found:stats.totalCandidates,stored:stats.verifiedStored,...stats};
+  } catch(e){ await updateRun(run?.id,{status:'failed',completed_at:new Date().toISOString(),message:e.message}); throw e; }
 }
 
 function escapeHtml(value) {
