@@ -1048,7 +1048,7 @@ bot.on("callback_query", async q => {
       return bot.sendMessage(chatId, `✅ Promotion complete.\n\nSent: ${sent}\nFailed: ${failed}\nProcessed: ${out.length}`, { reply_markup: { inline_keyboard: [[btn("📊 Status", "menu_status")], [btn("🏠 Main Menu", "menu_main")]] } });
     }
 
-    if (data === "menu_testemail") {
+   if (data === "menu_testemail") {
   inputState = { chatId, type: "test_email", step: "email" };
   return safeEdit(chatId, messageId, "🧪 Test Email\n\nSend the email address where you want the test sent.", {
     inline_keyboard: [[btn("❌ Cancel", "testemail_cancel")]]
@@ -1059,6 +1059,11 @@ if (data === "testemail_cancel") {
   inputState = null;
   return showMain(chatId, messageId);
 }
+
+  } catch (e) {
+    console.error("Callback error:", e.message);
+    await bot.sendMessage(chatId, `Action failed.\n\n${e.message}`);
+  }
 });
 
 // Test-email text continuation.
