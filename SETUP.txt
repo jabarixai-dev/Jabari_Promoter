@@ -1,0 +1,30 @@
+JABARI PROMOTER — WEBSITE BLOG INTEGRATION
+
+1. Keep the existing Promoter Supabase variables exactly as they are:
+   PROMOTER_SUPABASE_URL
+   PROMOTER_SUPABASE_SERVICE_ROLE_KEY
+
+2. Add these Render environment variables for the Jabari website GitHub repository:
+   GITHUB_TOKEN = GitHub token with Contents read/write access to jabarixai-dev/Jabari
+   GITHUB_OWNER = jabarixai-dev
+   GITHUB_REPO = Jabari
+   GITHUB_BRANCH = main
+
+3. Replace the current bot.js with the bot.js in this package.
+4. Upload the lib/website/blog.js file to:
+   lib/website/blog.js
+5. Deploy Render.
+
+The new Website Blog menu reads/writes the same:
+   blog/posts.json
+
+It does NOT store website blog data in the Promoter Supabase database.
+
+Current Telegram actions added:
+- Website Blog
+- View Posts
+- View a post
+- Delete a post
+- New Post button is reserved for the next safe step (the current build does not wire the multi-step writer yet).
+
+IMPORTANT: Do not remove or change the Promoter Supabase variables.

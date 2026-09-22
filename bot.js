@@ -5,6 +5,7 @@ const crypto = require("crypto");
 const dns = require("dns").promises;
 const TelegramBot = require("node-telegram-bot-api");
 const { createClient } = require("@supabase/supabase-js");
+const websiteBlog = require("./lib/website/blog");
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const ownerId = String(process.env.BOT_OWNER_ID || "");
@@ -412,7 +413,7 @@ function mainMenuText() {
 
 function mainMenu() {
   return menu([
-    [btn("📝 Campaigns", "menu_campaigns")],
+    [btn("📝 Campaigns", "menu_campaigns"), btn("🌐 Website Blog", "menu_website_blog")],
     [btn("👥 Contacts", "menu_contacts"), btn("📧 Promote", "menu_promote")],
     [btn("🕵️ Email Scanner", "menu_scanner"), btn("📊 Status", "menu_status")],
     [btn("🧪 Test Email", "menu_testemail")]
@@ -422,6 +423,50 @@ function mainMenu() {
 async function showMain(chatId, messageId) {
   if (messageId) return safeEdit(chatId, messageId, mainMenuText(), mainMenu().reply_markup);
   return bot.sendMessage(chatId, mainMenuText(), mainMenu());
+}
+
+
+async function showWebsiteBlogMenu(chatId, messageId) {
+  const posts = await websiteBlog.listPosts();
+  const text = `🌐 Website Blog\n\nPosts in GitHub: ${posts.length}\n\nThis uses the same blog/posts.json as the Jabari website.`;
+  const rows = [
+    [btn("📋 View Posts", "website_blog_list")],
+    [btn("➕ New Post", "website_blog_create")],
+    [btn("🔄 Refresh", "menu_website_blog")],
+    [btn("⬅️ Back", "menu_main")]
+  ];
+  if (messageId) return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
+  return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: rows } });
+}
+
+async function showWebsiteBlogList(chatId, messageId) {
+  const posts = await websiteBlog.listPosts();
+  if (!posts.length) {
+    const kb = { inline_keyboard: [[btn("➕ New Post", "website_blog_create")], [btn("⬅️ Back", "menu_website_blog")]] };
+    const text = "📋 Website Blog\n\nNo posts found.";
+    if (messageId) return safeEdit(chatId, messageId, text, kb);
+    return bot.sendMessage(chatId, text, { reply_markup: kb });
+  }
+  const rows = posts.slice(0, 30).map(p => [btn(`${p.title || "Untitled"}`.slice(0, 50), `website_blog_view:${p.id}`)]);
+  rows.push([btn("➕ New Post", "website_blog_create")]);
+  rows.push([btn("⬅️ Back", "menu_website_blog")]);
+  const text = `📋 Website Blog\n\nShowing ${Math.min(posts.length, 30)} of ${posts.length} posts.`;
+  if (messageId) return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
+  return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: rows } });
+}
+
+async function showWebsiteBlogDetails(chatId, messageId, id) {
+  const posts = await websiteBlog.listPosts();
+  const p = posts.find(x => String(x.id) === String(id));
+  if (!p) throw new Error("Blog post not found.");
+  const preview = String(p.content || "").replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
+  const text = `📰 ${p.title}\n\nDate: ${p.date || "—"}\n\n${preview.slice(0, 2500)}${preview.length > 2500 ? "…" : ""}`;
+  const kb = { inline_keyboard: [
+    [btn("✏️ Edit", `website_blog_edit:${p.id}`), btn("🗑️ Delete", `website_blog_delete:${p.id}`)],
+    [btn("⬅️ Back", "website_blog_list")]
+  ]};
+  if (messageId) return safeEdit(chatId, messageId, text, kb);
+  return bot.sendMessage(chatId, text, { reply_markup: kb });
 }
 
 async function showCampaignMenu(chatId, messageId) {
@@ -783,6 +828,20 @@ bot.on("callback_query", async q => {
 
     if (data === "menu_main") { inputState = null; return showMain(chatId, messageId); }
     if (data === "menu_campaigns") return showCampaignMenu(chatId, messageId);
+    if (data === "menu_website_blog") return showWebsiteBlogMenu(chatId, messageId);
+    if (data === "website_blog_list") return showWebsiteBlogList(chatId, messageId);
+    if (data.startsWith("website_blog_view:")) return showWebsiteBlogDetails(chatId, messageId, data.slice("website_blog_view:".length));
+    if (data.startsWith("website_blog_delete:")) {
+      const id = data.slice("website_blog_delete:".length);
+      const posts = await websiteBlog.listPosts();
+      const p = posts.find(x => String(x.id) === String(id));
+      if (!p) throw new Error("Blog post not found.");
+      return safeEdit(chatId, messageId, `🗑️ Delete Website Post\n\n${p.title}\n\nAre you sure?`, { inline_keyboard: [[btn("🗑️ Yes, Delete", `website_blog_delete_yes:${id}`)], [btn("⬅️ Keep It", `website_blog_view:${id}`)]] });
+    }
+    if (data.startsWith("website_blog_delete_yes:")) {
+      await websiteBlog.deletePost(data.slice("website_blog_delete_yes:".length));
+      return showWebsiteBlogList(chatId, messageId);
+    }
     if (data === "menu_contacts") return showContactsMenu(chatId, messageId);
     if (data === "menu_status") return showStatus(chatId, messageId);
     if (data === "menu_promote") return showPromoteMenu(chatId, messageId);
