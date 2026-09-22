@@ -1,18 +1,10 @@
 const { createClient } = require('@supabase/supabase-js');
 const websiteBlog = require('./lib/website/blog');
+const crypto = require('crypto');
 
-const supabaseUrl = process.env.PROMOTER_SUPABASE_URL || '';
-const supabaseKey = process.env.PROMOTER_SUPABASE_SERVICE_ROLE_KEY || '';
+const supabase = createClient(process.env.PROMOTER_SUPABASE_URL || '', process.env.PROMOTER_SUPABASE_SERVICE_ROLE_KEY || '');
 const siteUrl = String(process.env.JABARI_SITE_URL || '').replace(/\/$/, '');
-
-if (!supabaseUrl || !supabaseKey) {
-  throw new Error('Missing PROMOTER_SUPABASE_URL or PROMOTER_SUPABASE_SERVICE_ROLE_KEY.');
-}
-
-const supabase = createClient(supabaseUrl, supabaseKey);
-let promotionHandler = null;
-let schedulerStarted = false;
-let schedulerBusy = false;
+let promotionHandler = null, schedulerStarted = false, schedulerBusy = false;
 
 const NEWS_FEEDS = [
   'https://news.google.com/rss/search?q=Web3+blockchain+crypto&hl=en-US&gl=US&ceid=US:en',
@@ -20,632 +12,60 @@ const NEWS_FEEDS = [
 ];
 
 const OPPORTUNITY_SOURCES = [
-  { name:'Gitcoin', url:'https://gitcoin.co/campaigns', type:'money_making', allowedHosts:['gitcoin.co'], match:/\/campaigns?\//i },
-  { name:'Immunefi', url:'https://immunefi.com/bug-bounty/', type:'bounty', allowedHosts:['immunefi.com'], match:/\/bug-bounty\/[^/?#]+/i },
-  { name:'Galxe', url:'https://app.galxe.com/quest/explore/all', type:'alpha', allowedHosts:['app.galxe.com','galxe.com'], match:/\/quest\/[^/?#]+\/[^/?#]+/i },
-  { name:'DoraHacks', url:'https://dorahacks.io/', type:'bounty', allowedHosts:['dorahacks.io'], match:/(bounty|hackathon|buidl|grant)/i }
+  {name:'Superteam Earn',url:'https://superteam.fun/earn/',allowedHosts:['superteam.fun'],type:'money_making',match:/(earn|bounty|project|grant|gig|campaign|challenge|content|design|dev)/i},
+  {name:'FaucetPay',url:'https://faucetpay.io/',allowedHosts:['faucetpay.io'],type:'money_making',match:/(faucet|ptc|offerwall|earn|claim|reward)/i},
+  {name:'Immunefi',url:'https://immunefi.com/bug-bounty/',allowedHosts:['immunefi.com'],type:'bounty',match:/\/bug-bounty\//i},
+  {name:'Gitcoin',url:'https://gitcoin.co/campaigns',allowedHosts:['gitcoin.co'],type:'money_making',match:/campaign|grant|fund/i},
+  {name:'Galxe',url:'https://app.galxe.com/quest/explore/all',allowedHosts:['app.galxe.com','galxe.com'],type:'alpha',match:/quest|campaign|galxe/i},
+  {name:'DoraHacks',url:'https://dorahacks.io/',allowedHosts:['dorahacks.io'],type:'bounty',match:/bounty|hackathon|grant|buidl/i}
 ];
 
 const OPPORTUNITY_FEEDS = [
   'https://news.google.com/rss/search?q=Web3+bounty+OR+crypto+bounty&hl=en-US&gl=US&ceid=US:en',
-  'https://news.google.com/rss/search?q=Web3+alpha+OR+crypto+airdrop+opportunity&hl=en-US&gl=US&ceid=US:en',
-  'https://news.google.com/rss/search?q=Web3+quest+reward+OR+blockchain+hackathon+bounty&hl=en-US&gl=US:en',
-  'https://news.google.com/rss/search?q=Web3+earn+opportunity+OR+crypto+grant&hl=en-US&gl=US:en'
+  'https://news.google.com/rss/search?q=Web3+gig+OR+crypto+freelance+opportunity&hl=en-US&gl=US&ceid=US:en',
+  'https://news.google.com/rss/search?q=Web3+quest+reward+OR+crypto+campaign&hl=en-US&gl=US&ceid=US:en',
+  'https://news.google.com/rss/search?q=crypto+faucet+earning+opportunity&hl=en-US&gl=US&ceid=US:en'
 ];
 
-function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
-
-function cleanText(value) {
-  let text = String(value || '').replace(/<!\[CDATA\[|\]\]>/g, '');
-  for (let i = 0; i < 3; i++) {
-    const decoded = text
-      .replace(/&amp;/g, '&')
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>');
-    if (decoded === text) break;
-    text = decoded;
-  }
-  return text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-}
-
-function xmlTag(item, tag) {
-  const re = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`, 'i');
-  return cleanText(item.match(re)?.[1] || '');
-}
-
-function parseRss(xml) {
-  const items = [];
-  const blocks = xml.match(/<item[\s\S]*?<\/item>/gi) || [];
-  for (const block of blocks) {
-    const title = xmlTag(block, 'title');
-    const link = xmlTag(block, 'link');
-    const description = xmlTag(block, 'description');
-    const pubDate = xmlTag(block, 'pubDate');
-    const source = xmlTag(block, 'source');
-    if (title && link) items.push({ title, link, description, pubDate, source });
-  }
-  return items;
-}
-
-async function fetchText(url, options = {}) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), options.timeout || 12000);
-  try {
-    const res = await fetch(url, {
-      signal: controller.signal,
-      redirect: options.redirect || 'follow',
-      headers: {
-        'User-Agent': 'JabariPromoter/1.0 Web3Research',
-        ...(options.headers || {})
-      }
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return { text: await res.text(), finalUrl: res.url || url, status: res.status };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function extractCanonicalUrl(html, baseUrl) {
-  const patterns = [
-    /<link[^>]+rel=["']canonical["'][^>]+href=["']([^"']+)["']/i,
-    /<meta[^>]+property=["']og:url["'][^>]+content=["']([^"']+)["']/i,
-    /<meta[^>]+name=["']twitter:url["'][^>]+content=["']([^"']+)["']/i
-  ];
-  for (const re of patterns) {
-    const match = html.match(re);
-    if (match?.[1]) {
-      try { return new URL(match[1], baseUrl).href; } catch (_) {}
-    }
-  }
-  return '';
-}
-
-async function resolveSourceUrl(rawUrl) {
-  const original = String(rawUrl || '').trim();
-  if (!/^https?:\/\//i.test(original)) return '';
-  let parsed;
-  try { parsed = new URL(original); } catch (_) { return ''; }
-
-  // RSS may expose a Google News redirect rather than the publisher's page.
-  // Follow it and, if Google remains the final host, inspect canonical metadata.
-  if (!/(\.|^)news\.google\.com$/i.test(parsed.hostname)) return original;
-
-  try {
-    const result = await fetchText(original, {
-      timeout: 15000,
-      headers: { 'Accept': 'text/html,application/xhtml+xml' }
-    });
-    try {
-      const final = new URL(result.finalUrl);
-      if (!/(\.|^)news\.google\.com$/i.test(final.hostname)) return final.href;
-    } catch (_) {}
-
-    const canonical = extractCanonicalUrl(result.text, result.finalUrl || original);
-    if (canonical) {
-      try {
-        const u = new URL(canonical);
-        if (!/(\.|^)news\.google\.com$/i.test(u.hostname)) return u.href;
-      } catch (_) {}
-    }
-
-    const metaRefresh = result.text.match(/<meta[^>]+http-equiv=["']refresh["'][^>]+content=["'][^"']*url=([^"']+)["']/i);
-    if (metaRefresh?.[1]) {
-      try {
-        const u = new URL(metaRefresh[1].trim(), result.finalUrl || original);
-        if (!/(\.|^)news\.google\.com$/i.test(u.hostname)) return u.href;
-      } catch (_) {}
-    }
-  } catch (e) {
-    console.error('Source URL resolution failed:', original, e.message);
-  }
-  return '';
-}
-
-async function fetchSourcePage(url) {
-  const result = await fetchText(url, {
-    timeout: 15000,
-    headers: { 'Accept': 'text/html,application/xhtml+xml' }
-  });
-  const canonical = extractCanonicalUrl(result.text, result.finalUrl || url);
-  return {
-    url: canonical || result.finalUrl || url,
-    html: result.text
-  };
-}
-
-function htmlToReadableText(html) {
-  return String(html || '')
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
-    .replace(/<svg[\s\S]*?<\/svg>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-async function fetchFeeds(feeds) {
-  const all = [];
-  for (const feed of feeds) {
-    try {
-      const result = await fetchText(feed);
-      all.push(...parseRss(result.text));
-    } catch (e) {
-      console.error('Web3 feed failed:', feed, e.message);
-    }
-  }
-  const seen = new Set();
-  return all.filter(item => {
-    const key = `${item.title.toLowerCase()}|${item.link}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-function sourceHostAllowed(url, source) {
-  try { const host=new URL(url).hostname.toLowerCase(); return source.allowedHosts.some(h=>host===h||host.endsWith('.'+h)); }
-  catch (_) { return false; }
-}
-function sourceTitleFromUrl(url, fallback) {
-  try { const x=new URL(url).pathname.split('/').filter(Boolean).pop()||''; const t=decodeURIComponent(x).replace(/[-_]+/g,' ').trim(); return t.length>3?t.replace(/\b\w/g,m=>m.toUpperCase()).slice(0,300):fallback; } catch (_) { return fallback; }
-}
-function extractAnchors(html, baseUrl) {
-  const out=[]; const re=/<a\b([^>]*?)href\s*=\s*["']([^"']+)["']([^>]*)>([\s\S]*?)<\/a>/gi; let m;
-  while((m=re.exec(String(html||'')))) { try { const url=new URL(m[2],baseUrl).href; const attrs=(m[1]||'')+' '+(m[3]||''); out.push({url,text:cleanText(m[4]||''),label:(attrs.match(/(?:aria-label|title)\s*=\s*["']([^"']+)["']/i)||[])[1]||''}); } catch(_){} }
-  return out;
-}
-function sourceCandidate(anchor, source) {
-  if(!sourceHostAllowed(anchor.url,source)) return null;
-  if(!source.match.test(anchor.url) && !source.match.test((anchor.text||'')+' '+(anchor.label||''))) return null;
-  if(anchor.url===source.url) return null;
-  const title=cleanText(anchor.label||anchor.text)||sourceTitleFromUrl(anchor.url,source.name+' opportunity');
-  if(/^(login|sign up|sign in|privacy|terms|docs|about|contact|home|search|settings)$/i.test(title)) return null;
-  let type=source.type; const text=(title+' '+anchor.url).toLowerCase();
-  if(source.name==='DoraHacks' && /grant/.test(text)) type='money_making';
-  return {opportunity_type:type,title:title.slice(0,300),summary:(anchor.text||anchor.label||title).slice(0,1600),source_url:anchor.url,source_name:source.name};
-}
-async function discoverPrimarySource(source) {
-  try { const page=await fetchSourcePage(source.url); const map=new Map(); for(const a of extractAnchors(page.html,page.url||source.url)){ const x=sourceCandidate(a,source); if(x&&!map.has(x.source_url)) map.set(x.source_url,x); if(map.size>=30) break; } return {source:source.name,candidates:[...map.values()],error:null}; }
-  catch(e){ console.error('Primary opportunity source failed: '+source.name,e.message); return {source:source.name,candidates:[],error:e.message}; }
-}
-async function fetchPrimaryOpportunityCandidates(){ const out=[]; for(const s of OPPORTUNITY_SOURCES) out.push(await discoverPrimarySource(s)); return out; }
-async function fetchSecondaryOpportunityCandidates(){ return (await fetchFeeds(OPPORTUNITY_FEEDS)).map(x=>({...x,secondary:true})); }
-function isTrustedOpportunityUrl(url){ try { return OPPORTUNITY_SOURCES.some(s=>sourceHostAllowed(url,s)); } catch(_){ return false; } }
-
-function classifyOpportunity(item) {
-  const text=String(item.title||'')+' '+String(item.description||item.summary||''); const lower=text.toLowerCase();
-  if(item.opportunity_type) return item.opportunity_type;
-  if(/bounty|hackathon|bug bounty/.test(lower)) return 'bounty';
-  if(/alpha|airdrop|early access|testnet|quest|campaign|points/.test(lower)) return 'alpha';
-  if(/grant|earn|reward|funding|opportunity|income/.test(lower)) return 'money_making';
-  return null;
-}
-function looksUsefulOpportunity(item) {
-  const text=(String(item.title||'')+' '+String(item.description||item.summary||'')).toLowerCase();
-  return !['casino','gambling','sportsbook','porn','adult','phishing','malware','ransomware','guaranteed profit','100% profit'].some(x=>text.includes(x));
-}
-
-function fingerprint(item, type, directUrl = '') {
-  const normalized = `${type}|${item.title}|${directUrl || item.link}`
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
-  return require('crypto').createHash('sha256').update(normalized).digest('hex');
-}
-
-function articleUrl(id) {
-  return siteUrl ? `${siteUrl}/#blog/${encodeURIComponent(id)}` : '';
-}
-
-async function getSettings() {
-  const { data, error } = await supabase.from('promoter_automation_settings').select('*').eq('id', 1).single();
-  if (error) throw error;
-  return data;
-}
-
-async function saveSettings(patch) {
-  const { data, error } = await supabase
-    .from('promoter_automation_settings')
-    .update({ ...patch, updated_at: new Date().toISOString() })
-    .eq('id', 1)
-    .select('*')
-    .single();
-  if (error) throw error;
-  return data;
-}
-
-async function logRun(runType, status, patch = {}) {
-  const payload = { run_type: runType, status, ...patch };
-  const { data, error } = await supabase.from('promoter_automation_runs').insert(payload).select('*').single();
-  if (error) console.error('Automation run log failed:', error.message);
-  return data;
-}
-
-async function updateRun(id, patch) {
-  if (!id) return;
-  const { error } = await supabase.from('promoter_automation_runs').update(patch).eq('id', id);
-  if (error) console.error('Automation run update failed:', error.message);
-}
-
-async function discoverOpportunities() {
-  const run=await logRun('opportunity_discovery','started',{started_at:new Date().toISOString()});
-  try {
-    const sourceResults=await fetchPrimaryOpportunityCandidates();
-    const primary=sourceResults.flatMap(x=>x.candidates);
-    const secondary=await fetchSecondaryOpportunityCandidates();
-    const combined=[...primary,...secondary]; const unique=new Map();
-    for(const item of combined){ const type=classifyOpportunity(item); const url=String(item.source_url||item.link||'').trim(); if(!type||!url||!looksUsefulOpportunity(item)) continue; try{const u=new URL(url).href; const k=type+'|'+u.toLowerCase(); if(!unique.has(k)) unique.set(k,{...item,opportunity_type:type,source_url:u});}catch(_){} }
-    const candidates=[...unique.values()];
-    const fps=candidates.map(x=>fingerprint({title:x.title,link:x.source_url},x.opportunity_type,x.source_url));
-    let known=new Set();
-    if(fps.length){ const {data,error}=await supabase.from('promoter_opportunities').select('fingerprint').in('fingerprint',fps); if(error) throw error; known=new Set((data||[]).map(x=>x.fingerprint)); }
-    const stats={sourcesChecked:OPPORTUNITY_SOURCES.length,sourceCandidates:Object.fromEntries(sourceResults.map(x=>[x.source,x.candidates.length])),primaryCandidates:primary.length,secondaryCandidates:secondary.length,totalCandidates:candidates.length,alreadyKnown:0,rejected:0,needsVerification:0,verifiedStored:0};
-    let verified=0;
-    for(const item of candidates){
-      const fp=fingerprint({title:item.title,link:item.source_url},item.opportunity_type,item.source_url);
-      if(known.has(fp)){stats.alreadyKnown++;continue;}
-      const primaryItem=!item.secondary&&OPPORTUNITY_SOURCES.some(s=>s.name===item.source_name&&sourceHostAllowed(item.source_url,s));
-      if(!primaryItem){stats.needsVerification++;continue;}
-      if(verified>=32){stats.needsVerification++;continue;}
-      try{
-        const page=await fetchSourcePage(item.source_url); const direct=page.url||item.source_url;
-        if(!isTrustedOpportunityUrl(direct)){stats.rejected++;continue;}
-        const text=htmlToReadableText(page.html).slice(0,18000); if(text.length<120){stats.needsVerification++;continue;}
-        const row={opportunity_type:item.opportunity_type,title:item.title,summary:cleanText(item.summary||text).slice(0,1600),content:'Source: '+item.source_name+'\n\n'+text.slice(0,7000),source_url:direct,source_name:item.source_name,discovered_at:new Date().toISOString(),fingerprint:fp,status:'verified'};
-        const {error}=await supabase.from('promoter_opportunities').insert(row);
-        if(!error){stats.verifiedStored++;verified++;} else if(error.code==='23505') stats.alreadyKnown++; else stats.needsVerification++;
-      }catch(e){console.error('Opportunity verification failed:',e.message);stats.needsVerification++;}
-    }
-    const message=['Sources checked: '+stats.sourcesChecked,...Object.entries(stats.sourceCandidates).map(([n,v])=>n+': '+v+' candidates'),'Primary candidates: '+stats.primaryCandidates,'Secondary leads: '+stats.secondaryCandidates,'Already known: '+stats.alreadyKnown,'Rejected: '+stats.rejected,'Needs verification: '+stats.needsVerification,'Verified & stored: '+stats.verifiedStored].join('\n');
-    await updateRun(run?.id,{status:'completed',completed_at:new Date().toISOString(),items_found:stats.totalCandidates,items_published:0,items_promoted:0,message});
-    return {found:stats.totalCandidates,stored:stats.verifiedStored,...stats};
-  } catch(e){ await updateRun(run?.id,{status:'failed',completed_at:new Date().toISOString(),message:e.message}); throw e; }
-}
-
-function escapeHtml(value) {
-  return String(value || '')
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
-
-function safeTitle(value, fallback) {
-  const title = cleanText(value).replace(/^web3\s+news\s+roundup\s*[-—:]\s*/i, '').trim();
-  return title || fallback;
-}
-
-async function generateGeminiArticle(prompt, fallbackTitle, fallbackContent) {
-  const key = process.env.GEMINI_API_KEY || '';
-  if (!key) return { title: fallbackTitle, content: fallbackContent };
-
-  const models = [
-    process.env.GEMINI_MODEL || 'gemini-3.8-flash',
-    'gemini-3.7-flash',
-    'gemini-3.6-flash',
-    'gemini-3.5-flash-lite'
-  ].filter((v, i, a) => v && a.indexOf(v) === i);
-
-  for (const model of models) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 30000);
-      let res;
-      try {
-        res = await fetch(url, {
-          method: 'POST',
-          signal: controller.signal,
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: {
-              temperature: 0.35,
-              maxOutputTokens: 7000
-            }
-          })
-        });
-      } finally {
-        clearTimeout(timer);
-      }
-      if (!res.ok) {
-        console.error(`Gemini ${model} failed: HTTP ${res.status}`);
-        continue;
-      }
-      const data = await res.json();
-      const text = data?.candidates?.[0]?.content?.parts?.map(p => p.text || '').join(' ').trim() || '';
-      if (!text) continue;
-
-      let title = fallbackTitle;
-      let content = text;
-      const titleMatch = text.match(/^\s*TITLE\s*:\s*(.+?)(?:\n|$)/i);
-      if (titleMatch) {
-        title = safeTitle(titleMatch[1], fallbackTitle);
-        content = text.slice(titleMatch[0].length).trim();
-      }
-      content = content.replace(/^```html\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim();
-      return { title, content };
-    } catch (e) {
-      console.error(`Gemini ${model} error:`, e.message);
-    }
-  }
-  return { title: fallbackTitle, content: fallbackContent };
-}
-
-async function buildDetailedOpportunityArticle(chosen) {
-  let sourceText = '';
-  let directUrl = chosen.source_url || '';
-
-  if (directUrl) {
-    try {
-      const page = await fetchSourcePage(directUrl);
-      directUrl = page.url || directUrl;
-      sourceText = htmlToReadableText(page.html).slice(0, 24000);
-    } catch (e) {
-      console.error('Could not read direct opportunity page:', e.message);
-    }
-  }
-
-  const fallbackTitle = safeTitle(chosen.title, 'Web3 Opportunity Worth Exploring');
-  const fallbackContent = [
-    `<p><strong>${escapeHtml(fallbackTitle)}</strong> is a ${escapeHtml(chosen.opportunity_type)} opportunity identified from a public Web3 source.</p>`,
-    `<h2>What is this opportunity?</h2><p>${escapeHtml(chosen.summary || chosen.content || 'The available public information is limited. Review the original opportunity page for the current details.')}</p>`,
-    `<h2>What to check before participating</h2><ul><li>Confirm the official project or organizer.</li><li>Check current eligibility and geographic restrictions.</li><li>Check the deadline, required tasks and reward terms.</li><li>Never share seed phrases, private keys or passwords.</li><li>Use the official participation page rather than an unverified copy.</li></ul>`,
-    `<h2>Original opportunity</h2><p><a href="${escapeHtml(directUrl)}" target="_blank" rel="noopener noreferrer">Open the original opportunity →</a></p>`,
-    `<p><strong>Verification note:</strong> Details can change. Confirm the current terms on the official source before taking action.</p>`
-  ].join('\n');
-
-  const prompt = `You are writing a high-quality Web3 opportunity article for Jabari.
-
-Create a detailed, useful article from the source material below. Do not invent eligibility, rewards, deadlines, investment returns, links, partnerships or instructions that are not supported by the source. If a detail is unclear, say it is unclear.
-
-Return:
-TITLE: one natural, interesting title (do not use "Web3 News Roundup")
-Then HTML only using <p>, <h2>, <h3>, <ul>, <ol>, <li>, <strong>, <a>.
-
-Target 900-1400 words.
-
-Cover:
-- What the opportunity is
-- Why it may matter
-- Who appears eligible, only if supported
-- Step-by-step participation instructions, only if supported
-- What participants may receive, only if supported
-- Important requirements and deadlines, only if supported
-- Risks, scams and verification checks
-- A concise practical takeaway
-- A final link to the original opportunity
-
-Opportunity type: ${chosen.opportunity_type}
-Title: ${chosen.title}
-Publisher: ${chosen.source_name}
-Direct source URL: ${directUrl}
-
-RSS summary:
-${chosen.summary || ''}
-
-Source page text:
-${sourceText || '(The direct page could not be read. Use only the RSS summary and clearly state when information is unavailable.)'}
-
-IMPORTANT: The article must not expose a Google News RSS URL. Use the direct source URL supplied above for the final original-opportunity link.`;
-
-  return generateGeminiArticle(prompt, fallbackTitle, fallbackContent);
-}
-
-function buildNewsFallback(items) {
-  const date = new Date().toLocaleDateString('en-US', { dateStyle: 'long' });
-  const lead = items[0]?.title || 'The Latest Web3 Developments';
-  const title = safeTitle(lead, `What’s Moving in Web3 — ${date}`);
-  const body = [
-    `<p>Here are several notable developments currently appearing across public Web3 reporting as of ${escapeHtml(date)}.</p>`,
-    ...items.slice(0, 6).map(item =>
-      `<h2>${escapeHtml(item.title)}</h2><p>${escapeHtml(item.description || 'Public reporting is available from the source below.')}</p>`
-    ),
-    '<h2>What to watch</h2><p>Track official announcements and primary sources as these developments evolve. Information in fast-moving Web3 markets can change quickly.</p>',
-    '<p><strong>Sources:</strong> The article is based on the public reports retrieved during this automation run.</p>'
-  ];
-  return { title, content: body.join('\n') };
-}
-
-async function buildNewsArticle(items) {
-  const fallback = buildNewsFallback(items);
-  const sourceMaterial = items.slice(0, 8).map((item, i) =>
-    `SOURCE ${i + 1}\nTitle: ${item.title}\nPublisher: ${item.source || 'Unknown'}\nURL: ${item.link}\nSummary: ${item.description || ''}`
-  ).join('\n\n');
-
-  const prompt = `Write a polished Web3 news article for Jabari from the public source material below.
-
-Return:
-TITLE: a natural, editorial headline. Never use "Web3 News Roundup", "News Roundup", or "Roundup" in the title.
-Then HTML only using <p>, <h2>, <h3>, <ul>, <li>, <strong> and <a>.
-
-Target 900-1300 words. Explain the most important developments, provide context, explain why they matter, and identify what readers should watch next. Do not invent facts. Do not present speculation as fact. Keep the tone professional and readable.
-
-Do not expose Google News RSS redirect URLs in the article. You may mention publishers by name, but do not add source links unless they are clearly direct publisher URLs.
-
-SOURCE MATERIAL:
-${sourceMaterial}`;
-
-  return generateGeminiArticle(prompt, fallback.title, fallback.content);
-}
-
-async function publishNews() {
-  const settings = await getSettings();
-  if (!settings.enabled || !settings.news_enabled) return { skipped: true, reason: 'News automation is OFF.' };
-  const run = await logRun('news_publish', 'started', { started_at: new Date().toISOString() });
-  try {
-    const items = await fetchFeeds(NEWS_FEEDS);
-    if (!items.length) throw new Error('No current Web3 news items were found.');
-    const article = await buildNewsArticle(items);
-    const post = await websiteBlog.createPost({
-      title: article.title,
-      content: article.content,
-      articleType: 'news'
-    });
-    const url = articleUrl(post.id);
-    await updateRun(run?.id, {
-      status: 'completed', completed_at: new Date().toISOString(),
-      items_found: items.length, items_published: 1, items_promoted: 0,
-      message: post.title
-    });
-    await saveSettings({ last_news_run_at: new Date().toISOString() });
-    return { skipped: false, post: { ...post, url } };
-  } catch (e) {
-    await updateRun(run?.id, { status: 'failed', completed_at: new Date().toISOString(), message: e.message });
-    throw e;
-  }
-}
-
-async function publishOpportunitySlot(slotName) {
-  const settings = await getSettings();
-  if (!settings.enabled || !settings.opportunities_enabled) return { skipped: true, reason: 'Opportunity automation is OFF.' };
-
-  const slot = String(slotName || 'Manual');
-  const now = new Date();
-  const slotKey = slot === 'Manual' ? `manual-${now.toISOString()}` : `${now.toISOString().slice(0,10)}-${slot}`;
-  if (slot !== 'Manual' && settings.last_opportunity_publish_slot === slotKey) {
-    return { skipped: true, reason: `${slot} slot has already been published today.` };
-  }
-
-  const { data: candidates, error } = await supabase
-    .from('promoter_opportunities')
-    .select('*')
-    .in('status', ['verified', 'discovered'])
-    .order('discovered_at', { ascending: false })
-    .limit(20);
-  if (error) throw error;
-  if (!candidates?.length) return { skipped: true, reason: 'No stored opportunity is available yet.' };
-
-  const chosen = candidates.find(x => !x.expires_at || new Date(x.expires_at) > now) || candidates[0];
-  if (!chosen.source_url || /(^|:\/\/)([^/]+\.)?news\.google\.com\//i.test(chosen.source_url)) {
-    await supabase.from('promoter_opportunities').update({
-      status: 'rejected',
-      updated_at: new Date().toISOString()
-    }).eq('id', chosen.id);
-    return { skipped: true, reason: 'Stored opportunity has no verified direct publisher URL. It was not published.' };
-  }
-
-  const article = await buildDetailedOpportunityArticle(chosen);
-  const post = await websiteBlog.createPost({
-    title: article.title,
-    content: article.content,
-    articleType: chosen.opportunity_type,
-    sourceUrl: chosen.source_url
-  });
-  const url = articleUrl(post.id);
-
-  await supabase.from('promoter_opportunities').update({
-    status: 'published', article_id: post.id, article_url: url,
-    published_at: now.toISOString(), updated_at: now.toISOString()
-  }).eq('id', chosen.id);
-
-  if (slot !== 'Manual') await saveSettings({ last_opportunity_publish_slot: slotKey });
-
-  let promotion = null;
-  if (settings.promotion_enabled && promotionHandler && url) {
-    try {
-      promotion = await promotionHandler({
-        title: article.title,
-        description: chosen.summary || chosen.content || '',
-        url
-      });
-      await supabase.from('promoter_opportunities').update({
-        status: 'promoted', promoted_at: new Date().toISOString(), updated_at: new Date().toISOString()
-      }).eq('id', chosen.id);
-    } catch (e) {
-      console.error('Opportunity promotion failed:', e.message);
-      promotion = { error: e.message };
-    }
-  }
-
-  await logRun('opportunity_publish', 'completed', {
-    started_at: now.toISOString(), completed_at: new Date().toISOString(),
-    items_found: 1, items_published: 1, items_promoted: promotion?.sent || 0,
-    message: `${slot}: ${article.title}`
-  });
-  return { skipped: false, post: { ...post, url }, promotion };
-}
-
-async function automationStatus() {
-  const settings = await getSettings();
-  const { count, error } = await supabase.from('promoter_opportunities')
-    .select('*', { count: 'exact', head: true })
-    .in('status', ['verified', 'discovered']);
-  if (error) throw error;
-  return { settings, pending: count || 0 };
-}
-
-function setPromotionHandler(fn) { promotionHandler = typeof fn === 'function' ? fn : null; }
-
-function lagosSlot() {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Africa/Lagos', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
-    year: 'numeric', month: '2-digit', day: '2-digit'
-  }).formatToParts(new Date());
-  const get = t => parts.find(x => x.type === t)?.value || '';
-  const hour = Number(get('hour'));
-  const minute = Number(get('minute'));
-  const date = `${get('year')}-${get('month')}-${get('day')}`;
-  if (hour === 9 && minute === 0) return { name: 'Morning', key: `${date}-Morning` };
-  if (hour === 15 && minute === 0) return { name: 'Afternoon', key: `${date}-Afternoon` };
-  if (hour === 21 && minute === 0) return { name: 'Night', key: `${date}-Night` };
-  return null;
-}
-
-async function schedulerTick() {
-  if (schedulerBusy) return;
-  schedulerBusy = true;
-  try {
-    const settings = await getSettings();
-    if (!settings.enabled) return;
-
-    const now = Date.now();
-    const lastScan = settings.last_opportunity_scan_at ? Date.parse(settings.last_opportunity_scan_at) : 0;
-    if (settings.hourly_discovery_enabled && (!lastScan || now - lastScan >= 60 * 60 * 1000)) {
-      try {
-        await discoverOpportunities();
-        await saveSettings({ last_opportunity_scan_at: new Date().toISOString() });
-      } catch (e) { console.error('Hourly opportunity scan failed:', e.message); }
-    }
-
-    const lastNews = settings.last_news_run_at ? Date.parse(settings.last_news_run_at) : 0;
-    if (settings.news_enabled && (!lastNews || now - lastNews >= Number(settings.news_interval_hours || 5) * 60 * 60 * 1000)) {
-      try { await publishNews(); } catch (e) { console.error('Scheduled news publish failed:', e.message); }
-    }
-
-    const slot = lagosSlot();
-    if (slot) {
-      try { await publishOpportunitySlot(slot.name); } catch (e) {
-        console.error(`Scheduled ${slot.name} opportunity failed:`, e.message);
-      }
-    }
-  } finally {
-    schedulerBusy = false;
-  }
-}
-
-function startScheduler() {
-  if (schedulerStarted) return;
-  schedulerStarted = true;
-  void schedulerTick();
-  setInterval(() => void schedulerTick(), 60 * 1000);
-}
-
-module.exports = {
-  getSettings,
-  saveSettings,
-  automationStatus,
-  setPromotionHandler,
-  discoverOpportunities,
-  publishNews,
-  publishOpportunitySlot,
-  startScheduler
-};
+const BAD = /casino|gambling|sportsbook|roulette|slots|plinko|dice|porn|adult|phishing|malware|ransomware|guaranteed profit|double your money|seed phrase|private key/i;
+
+function clean(v){return String(v||'').replace(/<!\[CDATA\[|\]\]>/g,'').replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim();}
+function tag(x,t){const m=String(x||'').match(new RegExp(`<${t}[^>]*>([\\s\\S]*?)</${t}>`,'i'));return clean(m?.[1]);}
+function parseRss(xml){return (String(xml||'').match(/<item[\s\S]*?<\/item>/gi)||[]).map(x=>({title:tag(x,'title'),link:tag(x,'link'),description:tag(x,'description'),source:tag(x,'source'),secondary:true})).filter(x=>x.title&&x.link);}
+async function fetchText(url){const c=new AbortController(),t=setTimeout(()=>c.abort(),15000);try{const r=await fetch(url,{signal:c.signal,redirect:'follow',headers:{'User-Agent':'JabariPromoter/2.0 OpportunityResearch'}});if(!r.ok)throw new Error(`HTTP ${r.status}`);return {text:await r.text(),finalUrl:r.url||url};}finally{clearTimeout(t);}}
+function canonical(html,base){for(const re of [/<link[^>]+rel=["']canonical["'][^>]+href=["']([^"']+)["']/i,/<meta[^>]+property=["']og:url["'][^>]+content=["']([^"']+)["']/i]){const m=String(html||'').match(re);if(m?.[1])try{return new URL(m[1],base).href}catch(_){}}return '';}
+async function page(url){const r=await fetchText(url);return {url:canonical(r.text,r.finalUrl)||r.finalUrl||url,html:r.text};}
+function readable(html){return String(html||'').replace(/<script[\s\S]*?<\/script>/gi,' ').replace(/<style[\s\S]*?<\/style>/gi,' ').replace(/<svg[\s\S]*?<\/svg>/gi,' ').replace(/<[^>]+>/g,' ').replace(/&nbsp;/gi,' ').replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/\s+/g,' ').trim();}
+function anchors(html,base){const out=[],re=/<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;let m;while((m=re.exec(String(html||''))))try{out.push({url:new URL(m[1],base).href,text:clean(m[2])})}catch(_){}return out;}
+function host(url,s){try{const h=new URL(url).hostname.toLowerCase();return s.allowedHosts.some(x=>h===x||h.endsWith('.'+x));}catch(_){return false;}}
+function trusted(url){return OPPORTUNITY_SOURCES.some(s=>host(url,s));}
+function action(text,url){return /apply|submit|participate|join|claim|complete|register|sign up|start earning|open|enter|create your profile|bounty|gig|quest|faucet|ptc|offerwall/i.test(`${text} ${url}`);}
+function useful(text){return /(?:\$|€|£|₦)\s?\d|USDC|USDT|USDG|reward|bounty|prize|due in|deadline|apply|submit|claim|earn|paid|grant|gig|faucet/i.test(text);}
+function funding(text){return /no proposals to evaluate|no grants to apply for|funding mechanism|retroactive funding/i.test(text);}
+function category(text){const s=String(text||'');if(/faucet/i.test(s))return 'FAUCET';if(/ptc|paid[- ]to[- ]click|offerwall/i.test(s))return 'PTC / OFFERWALL';if(/bug bounty|bounty/i.test(s))return 'BOUNTY';if(/freelance|gig/i.test(s))return 'FREELANCE';if(/quest/i.test(s))return 'QUEST';if(/airdrop/i.test(s))return 'AIRDROP';if(/hackathon|challenge|competition/i.test(s))return 'HACKATHON';if(/grant|funding/i.test(s))return 'GRANT';if(/ambassador/i.test(s))return 'AMBASSADOR';if(/design/i.test(s))return 'DESIGN';if(/content|writing|writer/i.test(s))return 'CONTENT';if(/developer|development|coding|build/i.test(s))return 'DEVELOPMENT';return 'OTHER';}
+function typeFor(c){return ['BOUNTY','HACKATHON'].includes(c)?'bounty':'money_making';}
+function reward(text){return (String(text||'').match(/(?:up to\s*)?(?:\$|€|£|₦)\s?\d[\d,.]*(?:\s?[KkMm])?(?:\s?(?:USDC|USDT|USD|EUR|GBP|NGN))?/gi)||[]).slice(0,3).join(' · ');}
+function deadline(text){const m=String(text||'').match(/due in\s+\d+\s*(?:d|day|days|h|hour|hours|m|month|months)|(?:deadline|due|ends?)\s*[:\-]?\s*[A-Za-z0-9 ,./-]{3,40}/i);return clean(m?.[0]);}
+function fp(x){return crypto.createHash('sha256').update(`${x.opportunity_type}|${x.title}|${x.source_url}`.toLowerCase()).digest('hex');}
+function articleUrl(id){return siteUrl?`${siteUrl}/#blog/${encodeURIComponent(id)}`:'';}
+async function getSettings(){const {data,error}=await supabase.from('promoter_automation_settings').select('*').eq('id',1).single();if(error)throw error;return data;}
+async function saveSettings(p){const {data,error}=await supabase.from('promoter_automation_settings').update({...p,updated_at:new Date().toISOString()}).eq('id',1).select('*').single();if(error)throw error;return data;}
+async function logRun(type,status,p={}){const {data,error}=await supabase.from('promoter_automation_runs').insert({run_type:type,status,...p}).select('*').single();if(error)console.error(error.message);return data;}
+async function updateRun(id,p){if(id)await supabase.from('promoter_automation_runs').update(p).eq('id',id);}
+async function discoverOpportunities(){const run=await logRun('opportunity_discovery','started',{started_at:new Date().toISOString()});try{const primary=[];const sourceCounts={};for(const s of OPPORTUNITY_SOURCES){try{const p=await page(s.url);const seen=new Set();let n=0;for(const a of anchors(p.html,p.url)){if(!host(a.url,s)||a.url===s.url||seen.has(a.url)||BAD.test(a.text+' '+a.url)||!s.match.test(a.text+' '+a.url))continue;if(s.name==='FaucetPay'&&/casino|gambling|roulette|plinko|dice|slots|sportsbook/i.test(a.text+' '+a.url))continue;seen.add(a.url);primary.push({title:a.text||new URL(a.url).pathname,summary:a.text,source_url:a.url,source_name:s.name,opportunity_type:s.type});n++;if(n>=40)break;}sourceCounts[s.name]=n;}catch(e){sourceCounts[s.name]=0;console.error(s.name,e.message);}}
+const secondary=[];for(const f of OPPORTUNITY_FEEDS)try{secondary.push(...parseRss((await fetchText(f)).text));}catch(e){console.error(e.message);}
+const unique=new Map();for(const x of primary){const k=`${x.source_name}|${x.source_url}`;if(!unique.has(k))unique.set(k,x);}const candidates=[...unique.values()];let stored=0,known=0,rejected=0,review=0;for(const item of candidates){const fingerprint=fp(item);const {data:old}=await supabase.from('promoter_opportunities').select('id').eq('fingerprint',fingerprint).maybeSingle();if(old){known++;continue;}try{const p=await page(item.source_url);const text=readable(p.html).slice(0,20000);if(text.length<180||BAD.test(text)||funding(text)||!action(text,p.url)||!useful(text)){review++;continue;}const c=category(`${item.title} ${item.summary} ${text}`);const row={opportunity_type:typeFor(c),title:clean(item.title).slice(0,300),summary:clean(item.summary||text).slice(0,1600),content:`Category: ${c}\nReward: ${reward(text)||'See original listing'}\nDeadline: ${deadline(text)||'See original listing'}\n\n${text.slice(0,7000)}`,source_url:p.url,source_name:item.source_name,discovered_at:new Date().toISOString(),fingerprint,status:'verified'};const {error}=await supabase.from('promoter_opportunities').insert(row);if(!error)stored++;else if(error.code==='23505')known++;else review++;}catch(e){review++;}}
+const msg=['Primary sources checked: '+OPPORTUNITY_SOURCES.length,...Object.entries(sourceCounts).map(([k,v])=>`${k}: ${v} candidates`),`Secondary news leads: ${secondary.length}`,`Already known: ${known}`,`Rejected/review: ${rejected+review}`,`Verified & stored: ${stored}`].join('\n');await updateRun(run?.id,{status:'completed',completed_at:new Date().toISOString(),items_found:candidates.length,items_published:0,items_promoted:0,message:msg});return {found:candidates.length,stored,...sourceCounts,secondaryLeads:secondary.length,known,review};}catch(e){await updateRun(run?.id,{status:'failed',completed_at:new Date().toISOString(),message:e.message});throw e;}}
+function esc(v){return String(v||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+function title(v,f){return clean(v)||f;}
+async function gemini(prompt,fTitle,fContent){const key=process.env.GEMINI_API_KEY||'';if(!key)return{title:fTitle,content:fContent};for(const model of [process.env.GEMINI_MODEL||'gemini-3.8-flash','gemini-3.7-flash','gemini-3.6-flash','gemini-3.5-flash-lite']){try{const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{temperature:.3,maxOutputTokens:3500}})});if(!r.ok)continue;const d=await r.json(),t=d?.candidates?.[0]?.content?.parts?.map(p=>p.text||'').join(' ').trim()||'';if(!t)continue;const m=t.match(/^\s*TITLE\s*:\s*(.+?)(?:\n|$)/i);return{title:title(m?.[1],fTitle),content:(m?t.slice(m[0].length):t).replace(/^```html\s*/i,'').replace(/^```\s*/i,'').replace(/```$/i,'').trim()};}catch(e){console.error('Gemini:',e.message);}}return{title:fTitle,content:fContent};}
+async function buildOpportunityArticle(chosen){let direct=chosen.source_url,text='';try{const p=await page(direct);direct=p.url||direct;text=readable(p.html).slice(0,22000);}catch(e){console.error(e.message);}const c=category(`${chosen.title} ${chosen.summary} ${text}`),r=reward(text),d=deadline(text);const fallback=`<p>${esc(chosen.summary||'A current opportunity found on a public earning platform.')}</p><p><strong>Category:</strong> ${esc(c)}<br><strong>Platform:</strong> ${esc(chosen.source_name)}<br><strong>Reward:</strong> ${esc(r||'See original listing')}<br><strong>Deadline:</strong> ${esc(d||'See original listing')}<br><strong>Cost to participate:</strong> See original listing<br><strong>Eligibility:</strong> See original listing</p><h2>What to do</h2><p>Open the official listing, review its requirements and follow the stated participation steps.</p><p><a href="${esc(direct)}" target="_blank" rel="noopener noreferrer"><strong>🔗 Open Original Opportunity →</strong></a></p><p><strong>Note:</strong> Rewards, eligibility and deadlines can change. Confirm the current terms on the original source.</p>`;const prompt=`Write a concise but detailed opportunity article for Jabari. Return TITLE: followed by HTML only. About 250-500 words, straight to the point. Include a short explanation and a compact block with Category, Platform, Reward, Deadline, Cost to participate and Eligibility when supported. Add a small How it works section. Do not invent facts. Do not promise earnings. Finish with a prominent Open Original Opportunity link using exactly this URL: ${direct}. Do not include Google News URLs. Source title: ${chosen.title}\nSource: ${chosen.source_name}\nSummary: ${chosen.summary}\nSource text:\n${text||'(unavailable)'}`;const a=await gemini(prompt,title(chosen.title,'Web3 Opportunity'),fallback);if(!String(a.content).includes(direct))a.content+=`\n<p><a href="${esc(direct)}" target="_blank" rel="noopener noreferrer"><strong>🔗 Open Original Opportunity →</strong></a></p>`;return a;}
+function newsFallback(items){return{title:title(items[0]?.title,'What’s Happening in Web3'),content:`<p>Here are the most relevant Web3 developments found during this run.</p>${items.slice(0,5).map(x=>`<h2>${esc(x.title)}</h2><p>${esc(x.description||'See the original publisher for details.')}</p>`).join('')}`};}
+async function publishNews(){const s=await getSettings();if(!s.enabled||!s.news_enabled)return{skipped:true,reason:'News automation is OFF.'};const items=[];for(const f of NEWS_FEEDS)try{items.push(...parseRss((await fetchText(f)).text));}catch(_){}if(!items.length)throw new Error('No current Web3 news items were found.');const fb=newsFallback(items);const a=await gemini(`Write a concise Web3 news article for Jabari. Return TITLE: then HTML only. About 400-700 words. Explain context and what to watch. No invented facts and no News Roundup wording. Source material:\n${items.slice(0,8).map(x=>x.title+'\n'+x.description).join('\n\n')}`,fb.title,fb.content);const post=await websiteBlog.createPost({title:a.title,content:a.content,articleType:'news'});await saveSettings({last_news_run_at:new Date().toISOString()});return{skipped:false,post:{...post,url:articleUrl(post.id)}};}
+async function publishOpportunitySlot(slot){const s=await getSettings();if(!s.enabled||!s.opportunities_enabled)return{skipped:true,reason:'Opportunity automation is OFF.'};const {data,error}=await supabase.from('promoter_opportunities').select('*').eq('status','verified').order('discovered_at',{ascending:false}).limit(30);if(error)throw error;if(!data?.length)return{skipped:true,reason:'No verified opportunity is available yet.'};const now=new Date();let chosen=null;for(const x of data){if(x.expires_at&&new Date(x.expires_at)<=now){await supabase.from('promoter_opportunities').update({status:'expired',updated_at:now.toISOString()}).eq('id',x.id);continue;}if(x.source_url&&trusted(x.source_url)){chosen=x;break;}}if(!chosen)return{skipped:true,reason:'No current verified opportunity passed the final safety check.'};const a=await buildOpportunityArticle(chosen),post=await websiteBlog.createPost({title:a.title,content:a.content,articleType:chosen.opportunity_type,sourceUrl:chosen.source_url}),url=articleUrl(post.id);await supabase.from('promoter_opportunities').update({status:'published',article_id:post.id,article_url:url,published_at:now.toISOString(),updated_at:now.toISOString()}).eq('id',chosen.id);let promotion=null;if(s.promotion_enabled&&promotionHandler){try{promotion=await promotionHandler({title:a.title,description:chosen.summary||'',url});await supabase.from('promoter_opportunities').update({status:'promoted',promoted_at:new Date().toISOString(),updated_at:new Date().toISOString()}).eq('id',chosen.id);}catch(e){promotion={error:e.message};}}return{skipped:false,post:{...post,url},promotion};}
+async function automationStatus(){const settings=await getSettings();const {count,error}=await supabase.from('promoter_opportunities').select('*',{count:'exact',head:true}).eq('status','verified');if(error)throw error;return{settings,pending:count||0};}
+function setPromotionHandler(fn){promotionHandler=typeof fn==='function'?fn:null;}
+function slot(){const p=new Intl.DateTimeFormat('en-CA',{timeZone:'Africa/Lagos',hour:'2-digit',minute:'2-digit',hourCycle:'h23',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date()),g=t=>p.find(x=>x.type===t)?.value||'',h=+g('hour'),m=+g('minute'),d=`${g('year')}-${g('month')}-${g('day')}`;if(h===9&&m===0)return`Morning`;if(h===15&&m===0)return`Afternoon`;if(h===21&&m===0)return`Night`;return null;}
+async function tick(){if(schedulerBusy)return;schedulerBusy=true;try{const s=await getSettings();if(!s.enabled)return;const now=Date.now(),last=s.last_opportunity_scan_at?Date.parse(s.last_opportunity_scan_at):0;if(s.hourly_discovery_enabled&&(!last||now-last>=3600000)){try{await discoverOpportunities();await saveSettings({last_opportunity_scan_at:new Date().toISOString()});}catch(e){console.error(e.message);}}const ln=s.last_news_run_at?Date.parse(s.last_news_run_at):0;if(s.news_enabled&&(!ln||now-ln>=Number(s.news_interval_hours||5)*3600000))try{await publishNews();}catch(e){console.error(e.message);}const sl=slot();if(sl)try{await publishOpportunitySlot(sl);}catch(e){console.error(e.message);}}finally{schedulerBusy=false;}}
+function startScheduler(){if(schedulerStarted)return;schedulerStarted=true;void tick();setInterval(()=>void tick(),60000);}
+module.exports={getSettings,saveSettings,automationStatus,setPromotionHandler,discoverOpportunities,publishNews,publishOpportunitySlot,startScheduler};

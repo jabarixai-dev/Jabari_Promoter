@@ -1,5 +1,8 @@
-Replace the existing web3-automation.js with this file and commit it to main.
+Jabari Promoter Opportunity System v2
 
-This version makes opportunity discovery source-first: Gitcoin, Immunefi, Galxe and DoraHacks are checked directly. Google News remains secondary research only and cannot create a verified opportunity by itself. The Telegram scan report now distinguishes primary candidates, secondary leads, known items, rejected items, items needing verification, and verified/stored opportunities.
+Replace web3-automation.js with the supplied file.
+Apply email-block.js inside finishPromotion() in bot.js.
 
-Node syntax check: passed.
+This version adds Superteam Earn and FaucetPay, excludes gambling-style FaucetPay links, treats Google News only as a secondary lead source, requires an actionable trusted-source page before verification, publishes only status=verified, generates short 250-500 word opportunity articles, includes Category/Platform/Reward/Deadline/Cost/Eligibility when supported, and guarantees an Original Opportunity link in the article.
+
+No database migration is required.
