@@ -9,6 +9,7 @@ const websiteBlog = require("./lib/website/blog");
 const websiteShop = require("./lib/website/shop");
 const websiteReviews = require("./lib/website/reviews");
 const websiteAbout = require("./lib/website/about");
+const websiteHome = require("./lib/website/home");
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const ownerId = String(process.env.BOT_OWNER_ID || "");
@@ -418,7 +419,7 @@ function mainMenu() {
   return menu([
     [btn("📝 Campaigns", "menu_campaigns"), btn("🌐 Website Blog", "menu_website_blog")],
     [btn("🛍️ Website Shop", "menu_website_shop"), btn("⭐ Website Reviews", "menu_website_reviews")],
-    [btn("👤 Website About", "menu_website_about")],
+    [btn("👤 Website About", "menu_website_about"), btn("🏠 Website Home", "menu_website_home")],
     [btn("👥 Contacts", "menu_contacts"), btn("📧 Promote", "menu_promote")],
     [btn("🕵️ Email Scanner", "menu_scanner"), btn("📊 Status", "menu_status")],
     [btn("🧪 Test Email", "menu_testemail")]
@@ -705,6 +706,79 @@ async function showWebsiteAboutPreview(chatId, messageId) {
 }
 
 
+async function showWebsiteHomeMenu(chatId, messageId) {
+  const home = await websiteHome.getHome();
+  const text = `🏠 Website Home
+
+Name: ${home.name}
+Tagline: ${home.tagline}
+
+Social links: ${Object.values(home.socials).filter(Boolean).length}/4
+Home buttons: ${home.buttons.length}/4
+Logo: ${home.logoUrl ? "Custom logo" : "Current website logo"}
+
+This uses the same home/content.json as the Jabari website.`;
+  const rows = [
+    [btn("✏️ Edit Home Text", "website_home_text")],
+    [btn("🔗 Social Links", "website_home_socials")],
+    [btn("🔘 Home Buttons", "website_home_buttons")],
+    [btn("🖼️ Change Logo", "website_home_logo")],
+    [btn("👀 Preview", "website_home_preview")],
+    [btn("🔄 Refresh", "menu_website_home")],
+    [btn("⬅️ Back", "menu_main")]
+  ];
+  if (messageId) return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
+  return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: rows } });
+}
+
+async function startWebsiteHomeTextWizard(chatId, messageId) {
+  const home = await websiteHome.getHome();
+  inputState = { chatId, type: "website_home_text", step: "name", home };
+  return safeEdit(chatId, messageId,
+    `✏️ Edit Website Home Text\n\nCurrent name:\n${home.name}\n\nSend the new name.`,
+    { inline_keyboard: [[btn("❌ Cancel", "website_home_cancel")]] }
+  );
+}
+
+async function startWebsiteHomeSocialWizard(chatId, messageId) {
+  const home = await websiteHome.getHome();
+  inputState = { chatId, type: "website_home_socials", step: "whatsapp", home };
+  return safeEdit(chatId, messageId,
+    `🔗 Edit Home Social Links\n\nCurrent WhatsApp:\n${home.socials.whatsapp}\n\nSend the new WhatsApp link.`,
+    { inline_keyboard: [[btn("❌ Cancel", "website_home_cancel")]] }
+  );
+}
+
+async function startWebsiteHomeButtonsWizard(chatId, messageId) {
+  const home = await websiteHome.getHome();
+  inputState = { chatId, type: "website_home_buttons", step: "b1_text", home };
+  return safeEdit(chatId, messageId,
+    `🔘 Edit Home Buttons\n\nButton 1 current text: ${home.buttons[0].text}\n\nSend the new Button 1 text.`,
+    { inline_keyboard: [[btn("❌ Cancel", "website_home_cancel")]] }
+  );
+}
+
+async function showWebsiteHomePreview(chatId, messageId) {
+  const home = await websiteHome.getHome();
+  const text = `🏠 Website Home Preview
+
+${home.name}
+${home.tagline}
+
+WhatsApp: ${home.socials.whatsapp}
+X: ${home.socials.x}
+Telegram: ${home.socials.telegram}
+YouTube: ${home.socials.youtube}
+
+Buttons:
+${home.buttons.map((b,i) => `${i + 1}. ${b.text} → ${b.href}`).join("\n")}
+
+Footer:
+${home.footer}`;
+  return safeEdit(chatId, messageId, text, { inline_keyboard: [[btn("🏠 Website Home", "menu_website_home")], [btn("🏠 Main Menu", "menu_main")]] });
+}
+
+
 async function showCampaignMenu(chatId, messageId) {
   const campaigns = await getCampaigns();
   const active = campaigns.find(c => c.is_active);
@@ -921,6 +995,44 @@ function createGmailMessage(to, subject, text) {
   ].join("\r\n"));
 }
 
+
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+async function getTelegramFileLinkWithRetry(fileId, attempts = 4) {
+  let lastError;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const result = await bot.getFileLink(fileId);
+      if (result) return result;
+    } catch (e) {
+      lastError = e;
+      if (i < attempts - 1) await sleep(800 * (i + 1));
+    }
+  }
+  throw lastError || new Error("Could not get the Telegram file link.");
+}
+
+async function downloadBinary(url, attempts = 4) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const response = await fetch(url, {
+        headers: { "User-Agent": "JabariPromoter/1.0", "Connection": "close" },
+        signal: AbortSignal.timeout(30000)
+      });
+      if (!response.ok) throw new Error(`Telegram download returned HTTP ${response.status}.`);
+      const buffer = Buffer.from(await response.arrayBuffer());
+      if (!buffer.length) throw new Error("Downloaded file is empty.");
+      if (buffer.length > 10 * 1024 * 1024) throw new Error("Downloaded file is larger than 10 MB.");
+      return buffer;
+    } catch (e) {
+      lastError = e;
+      if (attempt < attempts) await sleep(1000 * attempt);
+    }
+  }
+  throw lastError || new Error("Could not download the Telegram file.");
+}
+
 async function sendEmail(to, subject, text) {
   if (mode !== "live") {
     console.log(`[DRY RUN] Email to ${to}: ${subject}`);
@@ -1118,6 +1230,63 @@ if (s.type === "website_shop_create" || s.type === "website_shop_edit") {
       return bot.sendMessage(msg.chat.id, "✅ Reply saved to the website.", { reply_markup: { inline_keyboard: [[btn("⭐ Review", `website_review_view:${s.id}`)], [btn("📋 Reviews", "website_reviews_list")], [btn("🏠 Main Menu", "menu_main")]] } });
     }
 
+
+    if (s.type === "website_home_text") {
+      if (s.step === "name") {
+        const value = msg.text.trim();
+        if (!value) return bot.sendMessage(msg.chat.id, "Please enter the Home name.");
+        s.home.name = value; s.step = "tagline";
+        return bot.sendMessage(msg.chat.id, `Current tagline:\n${s.home.tagline}\n\nSend the new tagline.`);
+      }
+      if (s.step === "tagline") {
+        const value = msg.text.trim();
+        if (!value) return bot.sendMessage(msg.chat.id, "Please enter the Home tagline.");
+        s.home.tagline = value; s.step = "footer";
+        return bot.sendMessage(msg.chat.id, `Current footer:\n${s.home.footer}\n\nSend the new Home footer.`);
+      }
+      if (s.step === "footer") {
+        const value = msg.text.trim();
+        if (!value) return bot.sendMessage(msg.chat.id, "Please enter the Home footer.");
+        s.home.footer = value; s.step = "preview";
+        return bot.sendMessage(msg.chat.id, `🏠 Home Text Preview\n\nName: ${s.home.name}\nTagline: ${s.home.tagline}\nFooter: ${s.home.footer}\n\nSave these changes?`, { reply_markup: { inline_keyboard: [[btn("✅ Save to Website", "website_home_save")], [btn("🔄 Start Again", "website_home_text")], [btn("❌ Cancel", "website_home_cancel")]] } });
+      }
+    }
+
+    if (s.type === "website_home_socials") {
+      if (s.step === "whatsapp") {
+        if (!/^https:\/\//i.test(msg.text.trim())) return bot.sendMessage(msg.chat.id, "Please send a valid https:// WhatsApp link.");
+        s.home.socials.whatsapp = msg.text.trim(); s.step = "x";
+        return bot.sendMessage(msg.chat.id, `Current X link:\n${s.home.socials.x}\n\nSend the new X link.`);
+      }
+      if (s.step === "x") {
+        if (!/^https:\/\//i.test(msg.text.trim())) return bot.sendMessage(msg.chat.id, "Please send a valid https:// link.");
+        s.home.socials.x = msg.text.trim(); s.step = "telegram";
+        return bot.sendMessage(msg.chat.id, `Current Telegram link:\n${s.home.socials.telegram}\n\nSend the new Telegram link.`);
+      }
+      if (s.step === "telegram") {
+        if (!/^https:\/\//i.test(msg.text.trim())) return bot.sendMessage(msg.chat.id, "Please send a valid https:// link.");
+        s.home.socials.telegram = msg.text.trim(); s.step = "youtube";
+        return bot.sendMessage(msg.chat.id, `Current YouTube link:\n${s.home.socials.youtube}\n\nSend the new YouTube link.`);
+      }
+      if (s.step === "youtube") {
+        if (!/^https:\/\//i.test(msg.text.trim())) return bot.sendMessage(msg.chat.id, "Please send a valid https:// link.");
+        s.home.socials.youtube = msg.text.trim(); s.step = "preview";
+        return bot.sendMessage(msg.chat.id, `🔗 Social Links Preview\n\nWhatsApp: ${s.home.socials.whatsapp}\nX: ${s.home.socials.x}\nTelegram: ${s.home.socials.telegram}\nYouTube: ${s.home.socials.youtube}\n\nSave these changes?`, { reply_markup: { inline_keyboard: [[btn("✅ Save to Website", "website_home_save")], [btn("🔗 Start Again", "website_home_socials")], [btn("❌ Cancel", "website_home_cancel")]] } });
+      }
+    }
+
+    if (s.type === "website_home_buttons") {
+      const validLink = value => /^#[A-Za-z0-9_-]+$/.test(value) || /^https:\/\//i.test(value);
+      if (s.step === "b1_text") { const v=msg.text.trim(); if(!v) return bot.sendMessage(msg.chat.id,"Enter Button 1 text."); s.home.buttons[0].text=v; s.step="b1_href"; return bot.sendMessage(msg.chat.id, `Current Button 1 link:\n${s.home.buttons[0].href}\n\nSend the new link (#section or https://).`); }
+      if (s.step === "b1_href") { const v=msg.text.trim(); if(!validLink(v)) return bot.sendMessage(msg.chat.id,"Use a #section link or https:// URL."); s.home.buttons[0].href=v; s.step="b2_text"; return bot.sendMessage(msg.chat.id, `Button 2 current text: ${s.home.buttons[1].text}\n\nSend the new Button 2 text.`); }
+      if (s.step === "b2_text") { const v=msg.text.trim(); if(!v) return bot.sendMessage(msg.chat.id,"Enter Button 2 text."); s.home.buttons[1].text=v; s.step="b2_href"; return bot.sendMessage(msg.chat.id, `Current Button 2 link:\n${s.home.buttons[1].href}\n\nSend the new link.`); }
+      if (s.step === "b2_href") { const v=msg.text.trim(); if(!validLink(v)) return bot.sendMessage(msg.chat.id,"Use a #section link or https:// URL."); s.home.buttons[1].href=v; s.step="b3_text"; return bot.sendMessage(msg.chat.id, `Button 3 current text: ${s.home.buttons[2].text}\n\nSend the new Button 3 text.`); }
+      if (s.step === "b3_text") { const v=msg.text.trim(); if(!v) return bot.sendMessage(msg.chat.id,"Enter Button 3 text."); s.home.buttons[2].text=v; s.step="b3_href"; return bot.sendMessage(msg.chat.id, `Current Button 3 link:\n${s.home.buttons[2].href}\n\nSend the new link.`); }
+      if (s.step === "b3_href") { const v=msg.text.trim(); if(!validLink(v)) return bot.sendMessage(msg.chat.id,"Use a #section link or https:// URL."); s.home.buttons[2].href=v; s.step="b4_text"; return bot.sendMessage(msg.chat.id, `Button 4 current text: ${s.home.buttons[3].text}\n\nSend the new Button 4 text.`); }
+      if (s.step === "b4_text") { const v=msg.text.trim(); if(!v) return bot.sendMessage(msg.chat.id,"Enter Button 4 text."); s.home.buttons[3].text=v; s.step="b4_href"; return bot.sendMessage(msg.chat.id, `Current Button 4 link:\n${s.home.buttons[3].href}\n\nSend the new link.`); }
+      if (s.step === "b4_href") { const v=msg.text.trim(); if(!validLink(v)) return bot.sendMessage(msg.chat.id,"Use a #section link or https:// URL."); s.home.buttons[3].href=v; s.step="preview"; return bot.sendMessage(msg.chat.id, `🔘 Home Buttons Preview\n\n${s.home.buttons.map((b,i)=>`${i+1}. ${b.text} → ${b.href}`).join("\n")}\n\nSave these changes?`, {reply_markup:{inline_keyboard:[[btn("✅ Save to Website","website_home_save")],[btn("🔘 Start Again","website_home_buttons")],[btn("❌ Cancel","website_home_cancel")]]}}); }
+    }
+
     if (s.type === "website_about_edit") {
       if (s.step === "bio") {
         const bio = msg.text.trim();
@@ -1215,6 +1384,26 @@ bot.on("callback_query", async q => {
     if (data === "menu_website_blog") return showWebsiteBlogMenu(chatId, messageId);
     if (data === "menu_website_shop") return showWebsiteShopMenu(chatId, messageId);
 
+
+    if (data === "menu_website_home") return showWebsiteHomeMenu(chatId, messageId);
+    if (data === "website_home_text") return startWebsiteHomeTextWizard(chatId, messageId);
+    if (data === "website_home_socials") return startWebsiteHomeSocialWizard(chatId, messageId);
+    if (data === "website_home_buttons") return startWebsiteHomeButtonsWizard(chatId, messageId);
+    if (data === "website_home_logo") {
+      inputState = { chatId, type: "website_home_logo", step: "photo" };
+      return safeEdit(chatId, messageId, "🖼️ Change Website Home Logo\n\nSend the new logo as a Telegram photo.\n\nRecommended: square JPG/PNG/WebP, 360×360 or larger, under 2 MB.", { inline_keyboard: [[btn("❌ Cancel", "website_home_cancel")]] });
+    }
+    if (data === "website_home_preview") return showWebsiteHomePreview(chatId, messageId);
+    if (data === "website_home_cancel") { inputState = null; return showWebsiteHomeMenu(chatId, messageId); }
+
+    if (data === "website_home_save") {
+      if (!inputState || inputState.chatId !== chatId || !["website_home_text","website_home_socials","website_home_buttons"].includes(inputState.type)) return showWebsiteHomeMenu(chatId, messageId);
+      const s = inputState;
+      await safeEdit(chatId, messageId, "⏳ Saving Home content to the Jabari website GitHub repository...");
+      await websiteHome.saveHome(s.home);
+      inputState = null;
+      return safeEdit(chatId, messageId, "✅ Website Home updated.\n\nThe same home/content.json used by your Jabari website has been updated.", { inline_keyboard: [[btn("🏠 Website Home", "menu_website_home")], [btn("🏠 Main Menu", "menu_main")]] });
+    }
     if (data === "menu_website_about") return showWebsiteAboutMenu(chatId, messageId);
     if (data === "website_about_edit") {
       return startWebsiteAboutWizard(chatId, messageId);
@@ -1553,6 +1742,27 @@ bot.on("callback_query", async q => {
   } catch (e) {
     console.error("Callback error:", e.message);
     await bot.sendMessage(chatId, `Action failed.\n\n${e.message}`);
+  }
+});
+
+
+bot.on("photo", async msg => {
+  if (!isOwner(msg) || !inputState || inputState.chatId !== msg.chat.id || inputState.type !== "website_home_logo" || inputState.step !== "photo") return;
+  try {
+    const photo = msg.photo?.[msg.photo.length - 1];
+    if (!photo?.file_id) return bot.sendMessage(msg.chat.id, "❌ I could not read that image. Please send it again.");
+    await bot.sendMessage(msg.chat.id, "⏳ Uploading the new Home logo to the website…");
+    const fileUrl = await getTelegramFileLinkWithRetry(photo.file_id);
+    const buffer = await downloadBinary(fileUrl);
+    const logoUrl = await websiteHome.uploadLogo(buffer, "jabari-home-logo.jpg");
+    const home = await websiteHome.getHome();
+    home.logoUrl = logoUrl;
+    await websiteHome.saveHome(home);
+    inputState = null;
+    return bot.sendMessage(msg.chat.id, "✅ Home logo updated.\n\nThe new logo is now stored in GitHub and linked from home/content.json.", { reply_markup: { inline_keyboard: [[btn("🏠 Website Home", "menu_website_home")], [btn("🏠 Main Menu", "menu_main")]] } });
+  } catch (e) {
+    console.error("Website home logo upload error:", e.message);
+    return bot.sendMessage(msg.chat.id, `❌ Logo upload failed.\n\n${e.message}`);
   }
 });
 
