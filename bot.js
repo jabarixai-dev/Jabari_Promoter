@@ -469,6 +469,28 @@ async function showWebsiteBlogDetails(chatId, messageId, id) {
   return bot.sendMessage(chatId, text, { reply_markup: kb });
 }
 
+async function startWebsiteBlogWizard(chatId, messageId, mode, post = null) {
+  inputState = {
+    chatId,
+    type: mode === "edit" ? "website_blog_edit" : "website_blog_create",
+    step: "title",
+    id: post?.id || null,
+    title: post?.title || "",
+    content: post?.content || "",
+    image: post?.image || "",
+    video: post?.video || ""
+  };
+
+  const heading = mode === "edit" ? "✏️ Edit Website Blog Post" : "➕ New Website Blog Post";
+  const prompt = mode === "edit"
+    ? `Current title:\n${post?.title || "Untitled"}\n\nEnter the new title.`
+    : "Enter the blog post title.";
+
+  return safeEdit(chatId, messageId, `${heading}\n\n${prompt}`, {
+    inline_keyboard: [[btn("❌ Cancel", "website_blog_cancel")]]
+  });
+}
+
 async function showCampaignMenu(chatId, messageId) {
   const campaigns = await getCampaigns();
   const active = campaigns.find(c => c.is_active);
@@ -781,6 +803,36 @@ bot.on("message", async msg => {
       return;
     }
 
+    if (s.type === "website_blog_create" || s.type === "website_blog_edit") {
+      if (s.step === "title") {
+        const title = msg.text.trim();
+        if (!title) return bot.sendMessage(msg.chat.id, "Please enter a blog post title.");
+        s.title = title;
+        s.step = "content";
+        return bot.sendMessage(msg.chat.id, "Now send the blog post content.\n\nYou can use multiple paragraphs.");
+      }
+
+      if (s.step === "content") {
+        const content = msg.text;
+        if (!content.trim()) return bot.sendMessage(msg.chat.id, "Please enter the blog post content.");
+        s.content = content;
+        const preview =
+          `📝 ${s.type === "website_blog_edit" ? "Edit" : "New"} Website Blog Post\n\n` +
+          `Title:\n${s.title}\n\n` +
+          `Content:\n${s.content.slice(0, 3000)}${s.content.length > 3000 ? "…" : ""}\n\n` +
+          `Save this post to the Jabari website?`;
+        return bot.sendMessage(msg.chat.id, preview, {
+          reply_markup: {
+            inline_keyboard: [
+              [btn("✅ Save to Website", "website_blog_save")],
+              [btn("🔄 Start Again", "website_blog_restart")],
+              [btn("❌ Cancel", "website_blog_cancel")]
+            ]
+          }
+        });
+      }
+    }
+
     if (s.type === "campaign_create" || s.type === "campaign_edit") {
       if (s.step === "title") {
         if (!msg.text.trim()) return bot.sendMessage(msg.chat.id, "Please enter a campaign title.");
@@ -829,6 +881,47 @@ bot.on("callback_query", async q => {
     if (data === "menu_main") { inputState = null; return showMain(chatId, messageId); }
     if (data === "menu_campaigns") return showCampaignMenu(chatId, messageId);
     if (data === "menu_website_blog") return showWebsiteBlogMenu(chatId, messageId);
+    if (data === "website_blog_create") {
+      return startWebsiteBlogWizard(chatId, messageId, "create");
+    }
+    if (data.startsWith("website_blog_edit:")) {
+      const id = data.slice("website_blog_edit:".length);
+      const posts = await websiteBlog.listPosts();
+      const post = posts.find(x => String(x.id) === String(id));
+      if (!post) throw new Error("Blog post not found.");
+      return startWebsiteBlogWizard(chatId, messageId, "edit", post);
+    }
+    if (data === "website_blog_cancel") {
+      inputState = null;
+      return showWebsiteBlogMenu(chatId, messageId);
+    }
+    if (data === "website_blog_restart") {
+      if (!inputState || inputState.chatId !== chatId) return showWebsiteBlogMenu(chatId, messageId);
+      const mode = inputState.type === "website_blog_edit" ? "edit" : "create";
+      if (mode === "edit") {
+        const posts = await websiteBlog.listPosts();
+        const post = posts.find(x => String(x.id) === String(inputState.id));
+        if (!post) throw new Error("Blog post not found.");
+        return startWebsiteBlogWizard(chatId, messageId, "edit", post);
+      }
+      return startWebsiteBlogWizard(chatId, messageId, "create");
+    }
+    if (data === "website_blog_save") {
+      if (!inputState || inputState.chatId !== chatId) return showWebsiteBlogMenu(chatId, messageId);
+      const s = inputState;
+      if (!s.title || !s.content?.trim()) return bot.sendMessage(chatId, "Title and content are required.");
+      await safeEdit(chatId, messageId, "⏳ Saving the post to the Jabari website GitHub repository...");
+      const post = s.type === "website_blog_edit"
+        ? await websiteBlog.updatePost(s.id, { title: s.title, content: s.content, image: s.image || "", video: s.video || "" })
+        : await websiteBlog.createPost({ title: s.title, content: s.content, image: s.image || "", video: s.video || "" });
+      inputState = null;
+      return safeEdit(
+        chatId,
+        messageId,
+        `✅ Website Blog ${s.type === "website_blog_edit" ? "post updated" : "post created"}.\n\n${post.title}\n\nThe same blog/posts.json used by your Jabari website has been updated.`,
+        { inline_keyboard: [[btn("📋 View Posts", "website_blog_list")], [btn("🌐 Website Blog", "menu_website_blog")], [btn("🏠 Main Menu", "menu_main")]] }
+      );
+    }
     if (data === "website_blog_list") return showWebsiteBlogList(chatId, messageId);
     if (data.startsWith("website_blog_view:")) return showWebsiteBlogDetails(chatId, messageId, data.slice("website_blog_view:".length));
     if (data.startsWith("website_blog_delete:")) {
