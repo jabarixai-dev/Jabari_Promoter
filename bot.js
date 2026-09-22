@@ -13,11 +13,23 @@ const PORT = Number(process.env.PORT || 10000);
 const BASE_URL = process.env.RENDER_EXTERNAL_URL || "https://jabari-promoter.onrender.com";
 
 if (!token) throw new Error("Missing TELEGRAM_BOT_TOKEN");
-if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
-  throw new Error("Missing Supabase environment variables");
+const promoterSupabaseUrl =
+  process.env.PROMOTER_SUPABASE_URL || "";
+
+const promoterSupabaseServiceRoleKey =
+  process.env.PROMOTER_SUPABASE_SERVICE_ROLE_KEY || "";
+
+if (!promoterSupabaseUrl || !promoterSupabaseServiceRoleKey) {
+  throw new Error(
+    "Missing PROMOTER_SUPABASE_URL or PROMOTER_SUPABASE_SERVICE_ROLE_KEY. " +
+    "Jabari Promoter must use its own dedicated Supabase project."
+  );
 }
 
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+const supabase = createClient(
+  promoterSupabaseUrl,
+  promoterSupabaseServiceRoleKey
+);
 const bot = new TelegramBot(token, { polling: false });
 
 const webhookSecret = crypto.createHash("sha256").update(token).digest("hex");
