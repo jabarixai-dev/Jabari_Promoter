@@ -29,14 +29,25 @@ const OPPORTUNITY_FEEDS = [
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
 function cleanText(value) {
-  return String(value || '')
-    .replace(/<!\[CDATA\[|\]\]>/g, '')
+  let text = String(value || '')
+    .replace(/<!\[CDATA\[|\]\]>/g, '');
+
+  // RSS feeds can encode HTML markup as entities.
+  // Decode first, then remove the actual HTML tags.
+  for (let i = 0; i < 3; i++) {
+    const decoded = text
+      .replace(/&amp;/g, '&')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>');
+
+    if (decoded === text) break;
+    text = decoded;
+  }
+
+  return text
     .replace(/<[^>]*>/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
     .replace(/\s+/g, ' ')
     .trim();
 }
