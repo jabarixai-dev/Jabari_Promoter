@@ -414,7 +414,7 @@ function campaignPreview(c) {
 web3Automation.setPromotionHandler(async ({ title, description, url }) => {
   if (mode !== "live") return { sent: 0, dryRun: true };
   const previous = await getActiveCampaign();
-  const campaign = await createCampaign(title, description || "Web3 opportunity available on Jabari.", url);
+  const campaign = await createCampaign(title, description || "New opportunity available on Jabari.", url);
   await setActiveCampaign(campaign.id);
   try {
     const results = await finishPromotion();
@@ -976,20 +976,20 @@ async function finishPromotion(chatId) {
   if (!active) throw new Error("No active campaign.");
   if (!list.length) throw new Error("No contacts have been added yet.");
   const recipients = list.slice(0, PROMOTION_LIMIT);
-  const subject = `Worth a look: ${active.title || "A new opportunity from Jabari"}`;
+  const subject = `💰 ${active.title || "New Opportunity"}`;
+  const cleanDescription = String(active.description || "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/https?:\/\/\S+/gi, "")
+    .replace(/\s*\|\s*/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 360);
   const body = [
     "Hi,",
     "",
-    "I found something that may be worth your attention.",
+    active.title || "New Opportunity",
     "",
-    active.title || "New opportunity",
-    "",
-    active.description || "A new opportunity has been published on Jabari.",
-    "",
-    "If this is relevant to you, take a look now:",
-    active.blog_url,
-    "",
-    "Before you act, check the current eligibility, deadline, requirements and reward terms on the original source.",
+    cleanDescription || "A new opportunity is available to explore.",
     "",
     "Read the full breakdown:",
     active.blog_url,
