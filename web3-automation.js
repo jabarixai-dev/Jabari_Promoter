@@ -4,7 +4,7 @@ const crypto = require('crypto');
 
 const supabase = createClient(process.env.PROMOTER_SUPABASE_URL || '', process.env.PROMOTER_SUPABASE_SERVICE_ROLE_KEY || '');
 const siteUrl = String(process.env.JABARI_SITE_URL || '').replace(/\/$/, '');
-let promotionHandler = null, schedulerStarted = false, schedulerBusy = false;
+let promotionHandler = null, schedulerStarted = false, schedulerBusy = false, opportunityScanBusy = false;
 
 const NEWS_FEEDS = [
   'https://news.google.com/rss/search?q=Web3+blockchain+crypto&hl=en-US&gl=US&ceid=US:en',
@@ -12,14 +12,19 @@ const NEWS_FEEDS = [
 ];
 
 const OPPORTUNITY_SOURCES = [
-  {name:'Superteam Earn',url:'https://superteam.fun/earn/',allowedHosts:['superteam.fun'],type:'money_making',match:/(earn|bounty|project|grant|gig|campaign|challenge|content|design|dev|job)/i},
-  {name:'FaucetPay',url:'https://faucetpay.io/',allowedHosts:['faucetpay.io'],type:'money_making',match:/(faucet|ptc|offerwall|earn|claim|reward)/i},
-  {name:'Immunefi',url:'https://immunefi.com/bug-bounty/',allowedHosts:['immunefi.com'],type:'bounty',match:/bug-bounty|bounty/i},
-  {name:'Gitcoin',url:'https://gitcoin.co/mechanisms/bounties',allowedHosts:['gitcoin.co'],type:'money_making',match:/bount|grant|fund|reward/i},
-  {name:'Galxe',url:'https://app.galxe.com/quest/explore/all',allowedHosts:['app.galxe.com','galxe.com'],type:'alpha',match:/quest|campaign|galxe|reward/i},
-  {name:'DoraHacks',url:'https://dorahacks.io/',allowedHosts:['dorahacks.io'],type:'bounty',match:/bounty|hackathon|grant|buidl|prize/i},
-  {name:'Bounties',url:'https://bounties.sh/',allowedHosts:['bounties.sh'],type:'money_making',match:/bounty|project|creative|design|developer|content|paid/i},
-  {name:'Devpost',url:'https://devpost.com/hackathons',allowedHosts:['devpost.com'],type:'bounty',match:/hackathon|challenge|prize|competition/i}
+  {name:'Superteam Earn',url:'https://earn.superteam.fun/all/?status=open&tab=all',allowedHosts:['earn.superteam.fun','superteam.fun'],type:'money_making',match:/.*/i},
+  {name:'FaucetPay',url:'https://faucetpay.io/',allowedHosts:['faucetpay.io'],type:'money_making',match:/(faucet|ptc|offerwall|earn|claim|reward|task|offer)/i},
+  {name:'Immunefi',url:'https://immunefi.com/bug-bounty/',allowedHosts:['immunefi.com'],type:'bounty',match:/(bug-bounty|bounty|program|submit|reward)/i},
+  {name:'Gitcoin',url:'https://gitcoin.co/',allowedHosts:['gitcoin.co'],type:'money_making',match:/(bounty|grant|fund|round|reward|project|apply)/i},
+  {name:'Galxe',url:'https://app.galxe.com/quest/explore/all',allowedHosts:['app.galxe.com','galxe.com'],type:'money_making',match:/(quest|campaign|airdrop|reward|earn|galxe)/i},
+  {name:'DoraHacks',url:'https://dorahacks.io/',allowedHosts:['dorahacks.io'],type:'money_making',match:/(bounty|hackathon|grant|buidl|prize|competition|reward)/i},
+  {name:'Bounties',url:'https://bounties.sh/',allowedHosts:['bounties.sh'],type:'money_making',match:/(bounty|project|creative|design|developer|content|paid|task)/i},
+  {name:'Devpost',url:'https://devpost.com/hackathons',allowedHosts:['devpost.com'],type:'money_making',match:/(hackathon|challenge|prize|competition|join|register)/i},
+  {name:'Layer3',url:'https://app.layer3.xyz/quests?tab=all',allowedHosts:['app.layer3.xyz','layer3.xyz'],type:'money_making',match:/(quest|campaign|activation|reward|earn|token|airdrop)/i},
+  {name:'Zealy',url:'https://www.zealy.io/earn',allowedHosts:['zealy.io'],type:'money_making',match:/(quest|earn|reward|usdc|zap|crypto|token)/i},
+  {name:'Questbook',url:'https://www.questbook.app/',allowedHosts:['questbook.app','www.questbook.app'],type:'grant',match:/(grant|fund|proposal|funding|apply|program|reward)/i},
+  {name:'LaborX',url:'https://laborx.com/',allowedHosts:['laborx.com'],type:'money_making',match:/(job|freelance|project|gig|remote|vacancy|work|earn)/i},
+  {name:'CryptoJobsList',url:'https://cryptojobslist.com/',allowedHosts:['cryptojobslist.com'],type:'money_making',match:/(job|hiring|remote|freelance|career|engineer|designer|marketing)/i}
 ];
 
 const OPPORTUNITY_FEEDS = [
@@ -54,10 +59,88 @@ async function getSettings(){const {data,error}=await supabase.from('promoter_au
 async function saveSettings(p){const {data,error}=await supabase.from('promoter_automation_settings').update({...p,updated_at:new Date().toISOString()}).eq('id',1).select('*').single();if(error)throw error;return data;}
 async function logRun(type,status,p={}){const {data,error}=await supabase.from('promoter_automation_runs').insert({run_type:type,status,...p}).select('*').single();if(error)console.error(error.message);return data;}
 async function updateRun(id,p){if(id)await supabase.from('promoter_automation_runs').update(p).eq('id',id);}
-async function discoverOpportunities(){const run=await logRun('opportunity_discovery','started',{started_at:new Date().toISOString()});try{const primary=[];const sourceCounts={};for(const s of OPPORTUNITY_SOURCES){try{const p=await page(s.url);const seen=new Set();let n=0;for(const a of anchors(p.html,p.url)){if(!host(a.url,s)||a.url===s.url||seen.has(a.url)||BAD.test(a.text+' '+a.url)||!s.match.test(a.text+' '+a.url))continue;if(s.name==='FaucetPay'&&/casino|gambling|roulette|plinko|dice|slots|sportsbook/i.test(a.text+' '+a.url))continue;seen.add(a.url);primary.push({title:a.text||new URL(a.url).pathname,summary:a.text,source_url:a.url,source_name:s.name,opportunity_type:s.type});n++;if(n>=40)break;}sourceCounts[s.name]=n;}catch(e){sourceCounts[s.name]=0;console.error(s.name,e.message);}}
-const secondary=[];for(const f of OPPORTUNITY_FEEDS)try{secondary.push(...parseRss((await fetchText(f)).text));}catch(e){console.error(e.message);}
-const unique=new Map();for(const x of primary){const k=`${x.source_name}|${x.source_url}`;if(!unique.has(k))unique.set(k,x);}const candidates=[...unique.values()];let stored=0,known=0,rejected=0,review=0;for(const item of candidates){const fingerprint=fp(item);const {data:old}=await supabase.from('promoter_opportunities').select('id').eq('fingerprint',fingerprint).maybeSingle();if(old){known++;continue;}try{const p=await page(item.source_url);const text=readable(p.html).slice(0,20000);if(text.length<180||BAD.test(text)||funding(text)||!action(text,p.url)||!useful(text)){review++;continue;}const reviewResult=await geminiOpportunityReview(item.source_name,item.title,p.url,text);if(!reviewResult.valid){review++;continue;}const c=category(`${reviewResult.title||item.title} ${reviewResult.summary||item.summary} ${text}`);const cleanTitle=normalizeOpportunityTitle(reviewResult.title||item.title,item.source_name);const cleanSummary=clean(reviewResult.summary||item.summary||'').slice(0,700);const row={opportunity_type:typeFor(c),title:cleanTitle.slice(0,300),summary:cleanSummary,content:`Category: ${c}\nReward: ${reward(text)||'See original listing'}\nDeadline: ${deadline(text)||'See original listing'}\n\n${text.slice(0,7000)}`,source_url:p.url,source_name:item.source_name,discovered_at:new Date().toISOString(),fingerprint:fp({...item,title:cleanTitle}),status:'verified'};const {error}=await supabase.from('promoter_opportunities').insert(row);if(!error)stored++;else if(error.code==='23505')known++;else review++;}catch(e){review++;}}
-const msg=['Primary sources checked: '+OPPORTUNITY_SOURCES.length,...Object.entries(sourceCounts).map(([k,v])=>`${k}: ${v} candidates`),`Secondary news leads: ${secondary.length}`,`Already known: ${known}`,`Rejected/review: ${rejected+review}`,`Verified & stored: ${stored}`].join('\n');await updateRun(run?.id,{status:'completed',completed_at:new Date().toISOString(),items_found:candidates.length,items_published:0,items_promoted:0,message:msg});return {found:candidates.length,stored,...sourceCounts,secondaryLeads:secondary.length,known,review};}catch(e){await updateRun(run?.id,{status:'failed',completed_at:new Date().toISOString(),message:e.message});throw e;}}
+async function discoverOpportunities(){
+  if(opportunityScanBusy) return {found:0,stored:0,skipped:true,reason:'An opportunity scan is already running.'};
+  opportunityScanBusy=true;
+  const run=await logRun('opportunity_discovery','started',{started_at:new Date().toISOString()});
+  try{
+    const primary=[];
+    const sourceCounts={};
+    for(const s of OPPORTUNITY_SOURCES){
+      try{
+        const p=await page(s.url);
+        const seen=new Set(); let n=0;
+        for(const a of anchors(p.html,p.url)){
+          const hay=(a.text+' '+a.url).trim();
+          if(!host(a.url,s)||a.url===s.url||seen.has(a.url)||BAD.test(hay)||!s.match.test(hay)) continue;
+          if(/^(home|about|contact|login|sign in|sign up|privacy|terms|docs|blog|help|support|learn more|explore)$/i.test(clean(a.text))) continue;
+          if(s.name==='FaucetPay'&&/casino|gambling|roulette|plinko|dice|slots|sportsbook/i.test(hay)) continue;
+          seen.add(a.url);
+          primary.push({title:a.text||new URL(a.url).pathname,summary:a.text,source_url:a.url,source_name:s.name,opportunity_type:s.type});
+          n++; if(n>=80) break;
+        }
+        sourceCounts[s.name]=n;
+      }catch(e){sourceCounts[s.name]=0;console.error(s.name,e.message);}
+    }
+
+    // RSS/news leads are useful discovery leads too. Resolve them to their final URL,
+    // but only keep them when they land on one of our trusted opportunity platforms.
+    const secondary=[];
+    for(const f of OPPORTUNITY_FEEDS){
+      try{ secondary.push(...parseRss((await fetchText(f)).text)); }catch(e){ console.error(e.message); }
+    }
+    const secondaryResolved=[];
+    for(const x of secondary.slice(0,30)){
+      try{
+        const p=await page(x.link);
+        if(trusted(p.url)) secondaryResolved.push({title:x.title,summary:x.description||x.title,source_url:p.url,source_name:(OPPORTUNITY_SOURCES.find(s=>host(p.url,s))||{}).name||x.source||'Opportunity source',opportunity_type:'money_making'});
+      }catch(_){ }
+    }
+
+    const unique=new Map();
+    for(const x of [...primary,...secondaryResolved]){
+      const k=`${x.source_name}|${x.source_url}`;
+      if(!unique.has(k)) unique.set(k,x);
+    }
+    const allCandidates=[...unique.values()];
+
+    // Don't waste Gemini calls on obviously irrelevant links, but don't require
+    // reward/action keywords either; many legitimate listings hide those details.
+    const ranked=allCandidates.map(x=>{
+      const hay=`${x.title} ${x.summary} ${x.source_url}`.toLowerCase();
+      let score=0;
+      if(/bounty|reward|prize|grant|gig|freelance|job|quest|campaign|hackathon|challenge|contest|competition|faucet|paid|earn/i.test(hay)) score+=3;
+      if(/\$|usdc|usdt|paid|reward|prize/i.test(hay)) score+=2;
+      return {...x,_score:score};
+    }).sort((a,b)=>b._score-a._score).slice(0,140);
+
+    let stored=0,known=0,rejected=0,review=0;
+    for(const item of ranked){
+      const fingerprint=fp(item);
+      const {data:old}=await supabase.from('promoter_opportunities').select('id').eq('fingerprint',fingerprint).maybeSingle();
+      if(old){known++;continue;}
+      try{
+        const p=await page(item.source_url);
+        const text=readable(p.html).slice(0,20000);
+        if(text.length<180||BAD.test(text)||funding(text)){review++;continue;}
+        const reviewResult=await geminiOpportunityReview(item.source_name,item.title,p.url,text);
+        if(!reviewResult.valid){review++;continue;}
+        const c=category(`${reviewResult.title||item.title} ${reviewResult.summary||item.summary} ${text}`);
+        const cleanTitle=normalizeOpportunityTitle(reviewResult.title||item.title,item.source_name);
+        const cleanSummary=clean(reviewResult.summary||item.summary||'').slice(0,700);
+        const row={opportunity_type:typeFor(c),title:cleanTitle.slice(0,300),summary:cleanSummary,content:`Category: ${c}\nReward: ${reward(text)||'See original listing'}\nDeadline: ${deadline(text)||'See original listing'}\n\n${text.slice(0,7000)}`,source_url:p.url,source_name:item.source_name,discovered_at:new Date().toISOString(),fingerprint:fp({...item,title:cleanTitle}),status:'verified'};
+        const {error}=await supabase.from('promoter_opportunities').insert(row);
+        if(!error)stored++; else if(error.code==='23505')known++; else {review++;console.error('Opportunity insert:',error.message);}
+      }catch(e){review++;}
+    }
+    const msg=['Primary sources checked: '+OPPORTUNITY_SOURCES.length,...Object.entries(sourceCounts).map(([k,v])=>`${k}: ${v} candidates`),`Secondary leads: ${secondaryResolved.length}`,`Already known: ${known}`,`Rejected/review: ${rejected+review}`,`Verified & stored: ${stored}`].join('\n');
+    await updateRun(run?.id,{status:'completed',completed_at:new Date().toISOString(),items_found:allCandidates.length,items_published:0,items_promoted:0,message:msg});
+    return {found:allCandidates.length,reviewed:ranked.length,stored,...sourceCounts,secondaryLeads:secondaryResolved.length,known,review};
+  }catch(e){
+    await updateRun(run?.id,{status:'failed',completed_at:new Date().toISOString(),message:e.message});
+    throw e;
+  }finally{ opportunityScanBusy=false; }
+}
 function esc(v){return String(v||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 function title(v,f){return clean(v)||f;}function normalizeOpportunityTitle(v,source){let x=String(v||'').replace(/^[\s#*]+|[\s#*]+$/g,'').replace(/\s+/g,' ').trim();x=x.replace(/\b(?:for|to|from|by|on)\s+jabari\b/gi,'').replace(/\bjabari(?:'s|\s+own)?\s+(?:opportunity|campaign|sponsorship|bounty|program|grant|job)\b/gi,'').replace(/\s{2,}/g,' ').replace(/[-–—:|]+\s*$/,'').trim();return x||clean(source)||'New Opportunity';}
 
@@ -102,7 +185,9 @@ async function publishNews(){const s=await getSettings();if(!s.enabled||!s.news_
 async function publishOpportunitySlot(slot){const s=await getSettings();if(!s.enabled||!s.opportunities_enabled)return{skipped:true,reason:'Opportunity automation is OFF.'};const {data,error}=await supabase.from('promoter_opportunities').select('*').eq('status','verified').order('discovered_at',{ascending:false}).limit(30);if(error)throw error;if(!data?.length)return{skipped:true,reason:'No verified opportunity is available yet.'};const now=new Date();let chosen=null;for(const x of data){if(x.expires_at&&new Date(x.expires_at)<=now){await supabase.from('promoter_opportunities').update({status:'expired',updated_at:now.toISOString()}).eq('id',x.id);continue;}if(x.source_url&&trusted(x.source_url)){try{const pp=await page(x.source_url),txt=readable(pp.html).slice(0,14000),rv=await geminiOpportunityReview(x.source_name,x.title,pp.url,txt);if(!rv.valid){await supabase.from('promoter_opportunities').update({status:'rejected',updated_at:now.toISOString()}).eq('id',x.id);continue;}chosen={...x,title:normalizeOpportunityTitle(rv.title||x.title,x.source_name),summary:clean(rv.summary||x.summary||'').slice(0,700),source_url:pp.url};break;}catch(e){console.error('Opportunity final review:',e.message);continue;}}}if(!chosen)return{skipped:true,reason:'No current verified opportunity passed the final safety check.'};const a=await buildOpportunityArticle(chosen),post=await websiteBlog.createPost({title:a.title,content:a.content,articleType:chosen.opportunity_type,sourceUrl:chosen.source_url}),url=articleUrl(post.id);await supabase.from('promoter_opportunities').update({status:'published',article_id:post.id,article_url:url,published_at:now.toISOString(),updated_at:now.toISOString()}).eq('id',chosen.id);let promotion=null;if(s.promotion_enabled&&promotionHandler){try{const emailSummary=clean(chosen.summary||'').replace(/<[^>]*>/g,' ').replace(/https?:\/\/\S+/gi,'').replace(/\s+/g,' ').trim().slice(0,360);promotion=await promotionHandler({title:a.title,description:emailSummary,url});await supabase.from('promoter_opportunities').update({status:'promoted',promoted_at:new Date().toISOString(),updated_at:new Date().toISOString()}).eq('id',chosen.id);}catch(e){promotion={error:e.message};}}return{skipped:false,post:{...post,url},promotion};}
 async function automationStatus(){const settings=await getSettings();const {count,error}=await supabase.from('promoter_opportunities').select('*',{count:'exact',head:true}).eq('status','verified');if(error)throw error;return{settings,pending:count||0};}
 function setPromotionHandler(fn){promotionHandler=typeof fn==='function'?fn:null;}
+const DAILY_OPPORTUNITY_TIMES=['9:00 AM','3:00 PM','9:00 PM'];
+function getOpportunityScheduleLabel(){return `${DAILY_OPPORTUNITY_TIMES.join(' / ')} WAT`;}
 function slot(){const p=new Intl.DateTimeFormat('en-CA',{timeZone:'Africa/Lagos',hour:'2-digit',minute:'2-digit',hourCycle:'h23',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date()),g=t=>p.find(x=>x.type===t)?.value||'',h=+g('hour'),m=+g('minute'),d=`${g('year')}-${g('month')}-${g('day')}`;if(h===9&&m===0)return`Morning`;if(h===15&&m===0)return`Afternoon`;if(h===21&&m===0)return`Night`;return null;}
 async function tick(){if(schedulerBusy)return;schedulerBusy=true;try{const s=await getSettings();if(!s.enabled)return;const now=Date.now(),last=s.last_opportunity_scan_at?Date.parse(s.last_opportunity_scan_at):0;if(s.hourly_discovery_enabled&&(!last||now-last>=3600000)){try{await discoverOpportunities();await saveSettings({last_opportunity_scan_at:new Date().toISOString()});}catch(e){console.error(e.message);}}const ln=s.last_news_run_at?Date.parse(s.last_news_run_at):0;if(s.news_enabled&&(!ln||now-ln>=Number(s.news_interval_hours||5)*3600000))try{await publishNews();}catch(e){console.error(e.message);}const sl=slot();if(sl)try{await publishOpportunitySlot(sl);}catch(e){console.error(e.message);}}finally{schedulerBusy=false;}}
 function startScheduler(){if(schedulerStarted)return;schedulerStarted=true;void tick();setInterval(()=>void tick(),60000);}
-module.exports={getSettings,saveSettings,automationStatus,setPromotionHandler,discoverOpportunities,publishNews,publishOpportunitySlot,startScheduler};
+module.exports={getSettings,saveSettings,automationStatus,setPromotionHandler,discoverOpportunities,publishNews,publishOpportunitySlot,startScheduler,getOpportunityScheduleLabel};

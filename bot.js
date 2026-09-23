@@ -429,7 +429,7 @@ web3Automation.setPromotionHandler(async ({ title, description, url }) => {
 async function showWeb3AutomationMenu(chatId, messageId) {
   const status = await web3Automation.automationStatus();
   const s = status.settings;
-  const text = `🤖 Web3 Automation\n\nMaster: ${s.enabled ? "🟢 ON" : "🔴 OFF"}\nOpportunity discovery: ${s.opportunities_enabled ? "🟢 Hourly" : "⚪ OFF"}\nNews: ${s.news_enabled ? `🟢 Every ${s.news_interval_hours}h` : "⚪ OFF"}\nDaily opportunities: ${s.opportunities_per_day} (Morning / Afternoon / Night)\nPromotion: ${s.promotion_enabled ? "🟢 ON" : "⚪ OFF"}\nStored opportunities: ${status.pending}`;
+  const text = `🤖 Web3 Automation\n\nMaster: ${s.enabled ? "🟢 ON" : "🔴 OFF"}\nOpportunity discovery: ${s.opportunities_enabled ? "🟢 Hourly" : "⚪ OFF"}\nNews: ${s.news_enabled ? `🟢 Every ${s.news_interval_hours}h` : "⚪ OFF"}\nDaily opportunities: ${s.opportunities_per_day} (${web3Automation.getOpportunityScheduleLabel()})\nPromotion: ${s.promotion_enabled ? "🟢 ON" : "⚪ OFF"}\nStored opportunities: ${status.pending}`;
   const rows = [
     [btn(s.enabled ? "⏸ Turn Automation Off" : "▶️ Turn Automation On", "web3_toggle")],
     [btn("🔎 Run Opportunity Scan Now", "web3_scan_now")],
@@ -1532,6 +1532,8 @@ if (s.type === "website_shop_create" || s.type === "website_shop_edit") {
 });
 
 // ----- Buttons -----
+const handledCallbackQueries = new Map();
+let manualOpportunityScanBusy = false;
 bot.on("callback_query", async q => {
   if (!q.from || String(q.from.id) !== ownerId) return answer(q, "Access denied.");
   const chatId = q.message?.chat?.id;
@@ -1550,9 +1552,14 @@ bot.on("callback_query", async q => {
       return showWeb3AutomationMenu(chatId, messageId);
     }
     if (data === "web3_scan_now") {
-      await safeEdit(chatId, messageId, "🔎 Searching for Web3 alpha, bounty and money-making opportunities...", { inline_keyboard: [] });
-      const result = await web3Automation.discoverOpportunities();
-      return safeEdit(chatId, messageId, `✅ Opportunity scan complete.\n\nFound: ${result.found}\nStored: ${result.stored}`, { inline_keyboard: [[btn("🤖 Automation", "menu_web3_automation")]] });
+      if (manualOpportunityScanBusy) return safeEdit(chatId, messageId, "⏳ An opportunity scan is already running. Please wait for it to finish.", { inline_keyboard: [[btn("🤖 Automation", "menu_web3_automation")]] });
+      manualOpportunityScanBusy = true;
+      try {
+        await safeEdit(chatId, messageId, "🔎 Searching for real earning, bounty, freelance, reward and competition opportunities...", { inline_keyboard: [] });
+        const result = await web3Automation.discoverOpportunities();
+        if (result.skipped) return safeEdit(chatId, messageId, `⚪ ${result.reason}`, { inline_keyboard: [[btn("🤖 Automation", "menu_web3_automation")]] });
+        return safeEdit(chatId, messageId, `✅ Opportunity scan complete.\n\nFound: ${result.found}\nReviewed: ${result.reviewed || 0}\nStored: ${result.stored}`, { inline_keyboard: [[btn("🤖 Automation", "menu_web3_automation")]] });
+      } finally { manualOpportunityScanBusy = false; }
     }
     if (data === "web3_news_now") {
       await safeEdit(chatId, messageId, "📰 Researching current Web3 news and preparing one article...", { inline_keyboard: [] });
