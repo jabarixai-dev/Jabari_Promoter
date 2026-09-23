@@ -29,6 +29,7 @@ h1,h2,h3{line-height:1.08;letter-spacing:-.04em}
 .pagehead form{display:flex;max-width:700px;gap:10px}
 .pagehead input{flex:1;padding:14px 18px;border:1px solid #bbb;border-radius:999px;font:inherit}
 .article{max-width:920px;margin:auto;padding:80px 5%}
+.article .content a{color:#1565c0;text-decoration:underline;font-weight:700}
 .articlehead h1{font-size:clamp(3rem,7vw,5.5rem);margin:15px 0}
 .articlehead p{font-size:1.25rem;color:var(--muted)}
 .articleimg{width:100%;max-height:600px;object-fit:cover;margin:35px 0}
