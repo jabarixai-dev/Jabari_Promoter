@@ -970,26 +970,119 @@ async function sendWizardPreview(chatId) {
   return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [[btn("✅ Save Campaign", "wizard_save"), btn("✏️ Start Over", "wizard_restart")], [btn("❌ Cancel", "wizard_cancel")]] } });
 }
 
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function normalizeEmailSummary(value) {
+  return String(value || "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/https?:\/\/\S+/gi, "")
+    .replace(/\s*\|\s*/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 420);
+}
+
+async function getJabariEmailLogo() {
+  // Prefer an explicit logo URL when configured, otherwise use the same logo
+  // currently configured for the Jabari website home page.
+  if (process.env.JABARI_LOGO_URL) return process.env.JABARI_LOGO_URL.trim();
+  try {
+    const home = await websiteHome.getHome();
+    const raw = String(home?.logoUrl || "").trim();
+    if (!raw) return "";
+    if (/^https?:\/\//i.test(raw) || /^data:image\//i.test(raw)) return raw;
+    return `https://jabari-tech.netlify.app/${raw.replace(/^\/+/, "")}`;
+  } catch (e) {
+    console.warn("Could not load Jabari website logo for email:", e.message);
+    return "";
+  }
+}
+
+function buildOpportunityEmailHtml({ title, summary, blogUrl, logoUrl }) {
+  const safeTitle = escapeHtml(title || "New Opportunity");
+  const safeSummary = escapeHtml(summary || "A new opportunity is available to explore.");
+  const safeBlogUrl = escapeHtml(blogUrl || "#");
+  const logo = logoUrl
+    ? `<img src="${escapeHtml(logoUrl)}" alt="Jabari" width="150" style="display:block;width:150px;max-width:100%;height:auto;border:0;outline:none;text-decoration:none;">`
+    : `<div style="font-family:Arial,Helvetica,sans-serif;font-size:30px;line-height:1;font-weight:900;letter-spacing:3px;color:#ffffff;">JABARI</div>`;
+
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<meta name="x-apple-disable-message-reformatting">
+<title>${safeTitle}</title>
+</head>
+<body style="margin:0;padding:0;background:#080808;color:#ffffff;font-family:Arial,Helvetica,sans-serif;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;background:#080808;margin:0;padding:0;">
+<tr><td align="center" style="padding:22px 10px;">
+<table role="presentation" width="680" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:680px;background:#0d0d0d;border:1px solid #262626;">
+<tr>
+<td style="padding:25px 32px;background:#0b0b0b;border-bottom:1px solid #8b1018;background-image:linear-gradient(135deg,rgba(190,20,35,.22),transparent 35%),linear-gradient(315deg,rgba(212,168,67,.16),transparent 28%);">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+<td align="left" valign="middle">${logo}</td>
+<td align="right" valign="middle" style="font-size:11px;line-height:16px;letter-spacing:2px;text-transform:uppercase;color:#d4a843;font-weight:700;">Opportunity Alert</td>
+</tr></table>
+</td>
+</tr>
+<tr>
+<td style="padding:42px 38px 34px;background-image:radial-gradient(circle at 92% 20%,rgba(212,168,67,.16),transparent 24%),linear-gradient(135deg,rgba(130,10,20,.20),transparent 48%);">
+<div style="font-size:14px;line-height:20px;color:#d4a843;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;">Jabari Opportunity</div>
+<h1 style="margin:10px 0 16px;font-size:38px;line-height:1.08;color:#ffffff;font-weight:800;letter-spacing:-1px;">${safeTitle}</h1>
+<div style="height:3px;width:58px;background:#d4a843;margin:0 0 22px;"></div>
+<p style="margin:0;color:#dddddd;font-size:17px;line-height:1.65;">${safeSummary}</p>
+</td>
+</tr>
+<tr>
+<td style="padding:0 38px 38px;background:#f5f2eb;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#ffffff;border:1px solid #e3ded4;">
+<tr><td style="padding:28px 28px 24px;">
+<div style="display:inline-block;padding:7px 13px;background:#d4a843;color:#111111;font-size:11px;line-height:14px;font-weight:800;letter-spacing:1.4px;text-transform:uppercase;">Opportunity</div>
+<p style="margin:18px 0 0;color:#555555;font-size:14px;line-height:1.6;">We’ve put the important details and participation information together in a short breakdown.</p>
+</td></tr>
+<tr><td align="left" style="padding:0 28px 30px;">
+<a href="${safeBlogUrl}" style="display:inline-block;background:#111111;border:1px solid #d4a843;color:#ffffff;text-decoration:none;font-size:16px;line-height:20px;font-weight:800;padding:16px 24px;border-radius:6px;">Read Full Breakdown&nbsp;&nbsp;→</a>
+</td></tr>
+</table>
+</td>
+</tr>
+<tr>
+<td style="padding:26px 32px;background:#0b0b0b;border-top:1px solid #252525;background-image:linear-gradient(135deg,rgba(190,20,35,.12),transparent 45%),linear-gradient(315deg,rgba(212,168,67,.10),transparent 35%);">
+<div style="font-size:14px;line-height:22px;color:#aaaaaa;">Best,</div>
+<div style="margin-top:2px;font-size:24px;line-height:30px;color:#ffffff;font-weight:800;letter-spacing:1px;">Jabari</div>
+<div style="margin-top:9px;font-size:11px;line-height:17px;color:#d4a843;letter-spacing:1.5px;text-transform:uppercase;">Study Courageously. Learn Boldly. Grow Fearlessly.</div>
+</td>
+</tr>
+</table>
+</td></tr>
+</table>
+</body>
+</html>`;
+}
+
 async function finishPromotion(chatId) {
   const active = await getActiveCampaign();
   const list = await loadContacts();
   if (!active) throw new Error("No active campaign.");
   if (!list.length) throw new Error("No contacts have been added yet.");
   const recipients = list.slice(0, PROMOTION_LIMIT);
-  const subject = `💰 ${active.title || "New Opportunity"}`;
-  const cleanDescription = String(active.description || "")
-    .replace(/<[^>]*>/g, " ")
-    .replace(/https?:\/\/\S+/gi, "")
-    .replace(/\s*\|\s*/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 360);
-  const body = [
+  const titleText = String(active.title || "New Opportunity").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  const cleanDescription = normalizeEmailSummary(active.description) || "A new opportunity is available to explore.";
+  const subject = `💰 ${titleText}`;
+  const plainText = [
     "Hi,",
     "",
-    active.title || "New Opportunity",
+    titleText,
     "",
-    cleanDescription || "A new opportunity is available to explore.",
+    cleanDescription,
     "",
     "Read the full breakdown:",
     active.blog_url,
@@ -997,12 +1090,18 @@ async function finishPromotion(chatId) {
     "Best,",
     "Jabari"
   ].join("\n");
+  const html = buildOpportunityEmailHtml({
+    title: titleText,
+    summary: cleanDescription,
+    blogUrl: active.blog_url,
+    logoUrl: await getJabariEmailLogo()
+  });
   const out = [];
   stats.totalRuns++;
   stats.lastRun = new Date().toISOString();
   for (const c of recipients) {
     try {
-      await sendEmail(c.email, subject, body);
+      await sendEmail(c.email, subject, plainText, html);
       stats.totalSent++;
       out.push({ email: c.email, status: "sent" });
       await supabase.from("promoter_results").insert({ email: c.email, status: "sent", campaign_title: active.title });
@@ -1034,19 +1133,31 @@ function base64UrlEncode(value) {
   return Buffer.from(value).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
-function createGmailMessage(to, subject, text) {
+function createGmailMessage(to, subject, text, html) {
   const encodedSubject = `=?UTF-8?B?${Buffer.from(subject, "utf8").toString("base64")}?=`;
+  const boundary = `=_JABARI_${crypto.randomBytes(12).toString("hex")}`;
+  const plain = String(text || "").replace(/\r?\n/g, "\r\n");
+  const rich = String(html || "").replace(/\r?\n/g, "\r\n");
   return base64UrlEncode([
     "From: Jabari Promoter <jabari.xai@gmail.com>",
     `To: ${to}`,
     `Subject: ${encodedSubject}`,
     "MIME-Version: 1.0",
-    "Content-Type: text/plain; charset=UTF-8",
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
     "",
-    text
+    `--${boundary}`,
+    "Content-Type: text/plain; charset=UTF-8",
+    "Content-Transfer-Encoding: 8bit",
+    "",
+    plain,
+    `--${boundary}`,
+    "Content-Type: text/html; charset=UTF-8",
+    "Content-Transfer-Encoding: 8bit",
+    "",
+    rich,
+    `--${boundary}--`
   ].join("\r\n"));
 }
-
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
@@ -1085,7 +1196,7 @@ async function downloadBinary(url, attempts = 4) {
   throw lastError || new Error("Could not download the Telegram file.");
 }
 
-async function sendEmail(to, subject, text) {
+async function sendEmail(to, subject, text, html) {
   if (mode !== "live") {
     console.log(`[DRY RUN] Email to ${to}: ${subject}`);
     return { success: true, dryRun: true };
@@ -1098,7 +1209,7 @@ async function sendEmail(to, subject, text) {
   try {
     const response = await gmail.users.messages.send({
       userId: "me",
-      requestBody: { raw: createGmailMessage(to, subject, text) }
+      requestBody: { raw: createGmailMessage(to, subject, text, html) }
     });
     if (!response?.data?.id) throw new Error("Gmail API did not return a message ID.");
     return { success: true, id: response.data.id };
