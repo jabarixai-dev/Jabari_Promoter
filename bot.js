@@ -10,6 +10,7 @@ const websiteShop = require("./lib/website/shop");
 const websiteReviews = require("./lib/website/reviews");
 const websiteAbout = require("./lib/website/about");
 const websiteHome = require("./lib/website/home");
+const websiteWorks = require("./lib/website/works");
 const web3Automation = require("./web3-automation");
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -452,7 +453,8 @@ function mainMenu() {
     [btn("📝 Campaigns", "menu_campaigns"), btn("🌐 Website Blog", "menu_website_blog")],
     [btn("🛍️ Website Shop", "menu_website_shop"), btn("⭐ Website Reviews", "menu_website_reviews")],
     [btn("👤 Website About", "menu_website_about"), btn("🏠 Website Home", "menu_website_home")],
-    [btn("👥 Contacts", "menu_contacts"), btn("📧 Promote", "menu_promote")],
+    [btn("🛠️ My Works", "menu_website_works"), btn("👥 Contacts", "menu_contacts")],
+    [btn("📧 Promote", "menu_promote")],
     [btn("🕵️ Email Scanner", "menu_scanner"), btn("📊 Status", "menu_status")],
     [btn("🧪 Test Email", "menu_testemail")],
     [btn("🤖 Web3 Automation", "menu_web3_automation")]
@@ -738,6 +740,54 @@ async function showWebsiteAboutPreview(chatId, messageId) {
   });
 }
 
+
+async function showWebsiteWorksMenu(chatId, messageId) {
+  const works = await websiteWorks.getWorks();
+  const text = `🛠️ My Works\n\nWorks on website: ${works.length}\n\nAdd, edit, delete or view your portfolio works.`;
+  const rows = [
+    [btn("➕ Add Work", "website_works_add")],
+    [btn("📋 View Works", "website_works_list")],
+    [btn("🔄 Refresh", "menu_website_works")],
+    [btn("⬅️ Back", "menu_main")]
+  ];
+  if (messageId) return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
+  return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: rows } });
+}
+
+async function showWebsiteWorksList(chatId, messageId) {
+  const works = await websiteWorks.getWorks();
+  if (!works.length) {
+    const kb = { inline_keyboard: [[btn("➕ Add Work", "website_works_add")], [btn("⬅️ Back", "menu_website_works")]] };
+    const text = "📋 My Works\n\nNo works have been added yet.";
+    if (messageId) return safeEdit(chatId, messageId, text, kb);
+    return bot.sendMessage(chatId, text, { reply_markup: kb });
+  }
+  const rows = works.slice(0, 30).map(w => [btn((w.title || "Untitled").slice(0, 50), `website_works_view:${w.id}`)]);
+  rows.push([btn("➕ Add Work", "website_works_add")]);
+  rows.push([btn("⬅️ Back", "menu_website_works")]);
+  const text = `📋 My Works\n\nShowing ${Math.min(works.length, 30)} of ${works.length} works.`;
+  if (messageId) return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
+  return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: rows } });
+}
+
+async function showWebsiteWorkDetails(chatId, messageId, id) {
+  const works = await websiteWorks.getWorks();
+  const w = works.find(x => x.id === id);
+  if (!w) throw new Error("Work not found.");
+  const text = `🛠️ Work\n\nTitle: ${w.title}\n\nDescription:\n${w.body || "None"}\n\nImage: ${w.image ? "Yes" : "None"}\nLink: ${w.link || "None"}`;
+  const rows = [
+    [btn("✏️ Edit", `website_works_edit:${w.id}`), btn("🗑️ Delete", `website_works_delete:${w.id}`)],
+    [btn("⬅️ Works", "website_works_list")]
+  ];
+  return safeEdit(chatId, messageId, text, { inline_keyboard: rows });
+}
+
+function startWebsiteWorkWizard(chatId, messageId, mode, work = null) {
+  const item = work ? { ...work } : { id: `work-${Date.now()}`, title: '', body: '', image: '', link: '' };
+  inputState = { chatId, type: mode === 'edit' ? 'website_works_edit' : 'website_works_add', step: 'title', work: item };
+  const prompt = mode === 'edit' ? `✏️ Edit My Work\n\nCurrent title:\n${item.title}\n\nSend the new title.` : "➕ Add My Work\n\nSend the work title.";
+  return safeEdit(chatId, messageId, prompt, { inline_keyboard: [[btn("❌ Cancel", "website_works_cancel")]] });
+}
 
 async function showWebsiteHomeMenu(chatId, messageId) {
   const home = await websiteHome.getHome();
@@ -1394,6 +1444,30 @@ if (s.type === "website_shop_create" || s.type === "website_shop_edit") {
     }
 
 
+    if (s.type === "website_works_add" || s.type === "website_works_edit") {
+      if (s.step === "title") {
+        const v = msg.text.trim(); if (!v) return bot.sendMessage(msg.chat.id, "Please enter the work title.");
+        s.work.title = v; s.step = "body";
+        return bot.sendMessage(msg.chat.id, "Now send a short description of the work. Line breaks are supported.");
+      }
+      if (s.step === "body") {
+        s.work.body = msg.text.trim(); s.step = "link";
+        return bot.sendMessage(msg.chat.id, "Optional: send the live project link (https://), or type NONE.");
+      }
+      if (s.step === "link") {
+        const v = msg.text.trim();
+        if (v.toUpperCase() !== "NONE" && !/^https:\/\//i.test(v)) return bot.sendMessage(msg.chat.id, "Use an https:// link or type NONE.");
+        s.work.link = v.toUpperCase() === "NONE" ? "" : v; s.step = "image";
+        return bot.sendMessage(msg.chat.id, "Optional: send a project image now, or type NONE.");
+      }
+      if (s.step === "image") {
+        const v = msg.text.trim();
+        if (v.toUpperCase() !== "NONE") return bot.sendMessage(msg.chat.id, "Please send the image as a Telegram photo, or type NONE.");
+        s.work.image = ""; s.step = "preview";
+        return bot.sendMessage(msg.chat.id, `🛠️ Work Preview\n\nTitle: ${s.work.title}\n\n${s.work.body || "No description"}\n\nLink: ${s.work.link || "None"}\nImage: None\n\nSave this work?`, {reply_markup:{inline_keyboard:[[btn("✅ Save Work","website_works_save")],[btn("❌ Cancel","website_works_cancel")]]}});
+      }
+    }
+
     if (s.type === "website_home_text") {
       if (s.step === "name") {
         const value = msg.text.trim();
@@ -1575,6 +1649,16 @@ bot.on("callback_query", async q => {
     if (data === "menu_website_blog") return showWebsiteBlogMenu(chatId, messageId);
     if (data === "menu_website_shop") return showWebsiteShopMenu(chatId, messageId);
 
+
+    if (data === "menu_website_works") return showWebsiteWorksMenu(chatId, messageId);
+    if (data === "website_works_list") return showWebsiteWorksList(chatId, messageId);
+    if (data === "website_works_add") return startWebsiteWorkWizard(chatId, messageId, "add");
+    if (data === "website_works_cancel") { inputState = null; return showWebsiteWorksMenu(chatId, messageId); }
+    if (data.startsWith("website_works_view:")) return showWebsiteWorkDetails(chatId, messageId, data.slice("website_works_view:".length));
+    if (data.startsWith("website_works_edit:")) { const id = data.slice("website_works_edit:".length); const works = await websiteWorks.getWorks(); const w = works.find(x => x.id === id); if (!w) throw new Error("Work not found."); return startWebsiteWorkWizard(chatId, messageId, "edit", w); }
+    if (data.startsWith("website_works_delete:")) { const id = data.slice("website_works_delete:".length); return safeEdit(chatId, messageId, "🗑️ Delete this work?", {inline_keyboard:[[btn("🗑️ Yes, Delete", `website_works_delete_yes:${id}`)],[btn("⬅️ Keep It", `website_works_view:${id}`)]]}); }
+    if (data.startsWith("website_works_delete_yes:")) { const id=data.slice("website_works_delete_yes:".length); const works=await websiteWorks.getWorks(); await websiteWorks.saveWorks(works.filter(x=>x.id!==id)); return showWebsiteWorksList(chatId,messageId); }
+    if (data === "website_works_save") { if (!inputState || !["website_works_add","website_works_edit"].includes(inputState.type)) return showWebsiteWorksMenu(chatId,messageId); const works=await websiteWorks.getWorks(); const s=inputState; const idx=works.findIndex(x=>x.id===s.work.id); if(idx>=0) works[idx]=s.work; else works.unshift(s.work); await websiteWorks.saveWorks(works); inputState=null; return safeEdit(chatId,messageId,`✅ Work saved.\n\n${s.work.title}`,{inline_keyboard:[[btn("📋 View Works","website_works_list")],[btn("🛠️ My Works","menu_website_works")],[btn("🏠 Main Menu","menu_main")]]}); }
 
     if (data === "menu_website_home") return showWebsiteHomeMenu(chatId, messageId);
     if (data === "website_home_text") return startWebsiteHomeTextWizard(chatId, messageId);
@@ -1938,7 +2022,22 @@ bot.on("callback_query", async q => {
 
 
 bot.on("photo", async msg => {
-  if (!isOwner(msg) || !inputState || inputState.chatId !== msg.chat.id || inputState.type !== "website_home_logo" || inputState.step !== "photo") return;
+  if (!isOwner(msg) || !inputState || inputState.chatId !== msg.chat.id) return;
+  if (inputState.type === "website_works_add" || inputState.type === "website_works_edit") {
+    if (inputState.step !== "image") return;
+    try {
+      const photo = msg.photo?.[msg.photo.length - 1];
+      if (!photo?.file_id) return bot.sendMessage(msg.chat.id, "❌ I could not read that image. Please send it again.");
+      await bot.sendMessage(msg.chat.id, "⏳ Uploading the work image to GitHub…");
+      const fileUrl = await getTelegramFileLinkWithRetry(photo.file_id);
+      const buffer = await downloadBinary(fileUrl);
+      inputState.work.image = await websiteWorks.uploadImage(buffer, "work.jpg");
+      inputState.step = "preview";
+      const s = inputState;
+      return bot.sendMessage(msg.chat.id, `🛠️ Work Preview\n\nTitle: ${s.work.title}\n\n${s.work.body || "No description"}\n\nLink: ${s.work.link || "None"}\nImage: Added\n\nSave this work?`, {reply_markup:{inline_keyboard:[[btn("✅ Save Work","website_works_save")],[btn("❌ Cancel","website_works_cancel")]]}});
+    } catch (e) { return bot.sendMessage(msg.chat.id, `❌ Image upload failed.\n\n${e.message}`); }
+  }
+  if (inputState.type !== "website_home_logo" || inputState.step !== "photo") return;
   try {
     const photo = msg.photo?.[msg.photo.length - 1];
     if (!photo?.file_id) return bot.sendMessage(msg.chat.id, "❌ I could not read that image. Please send it again.");
